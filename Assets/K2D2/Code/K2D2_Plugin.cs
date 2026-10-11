@@ -226,7 +226,7 @@ namespace K2D2
 
         private static bool ValidScene()
         {
-            if (GeneralTools.Game == null) return false;
+            if (GeneralTools.Game?.GlobalGameState == null) return false;
 
             // FIXED during the Redux port verification pass: KSP.Game.GameStateMachine has no GetState()
             // method in the current Redux assemblies (confirmed via full member enumeration of
