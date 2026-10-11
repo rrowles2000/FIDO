@@ -156,6 +156,9 @@ namespace K2D2
             {
                 // The ID of the window. It should be unique to your mod.
                 WindowId = "K2D2",
+                // Redux stable 0.2.8.5: follow the game's UI scale setting (WindowOptions.Default sets this;
+                // an object initializer leaves it false, which selects UitkForKsp2's fixed-scale panel).
+                UseStockScale = true,
                 // The transform of parent game object of the window.
                 // If null, it will be created under the main canvas.
                 Parent = null,
