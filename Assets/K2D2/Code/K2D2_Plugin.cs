@@ -78,6 +78,8 @@ namespace K2D2
         public override void OnPreInitialized()
         {
             logger = SWLogger;
+            // Redux stable 0.2.8.5: unwrap the beta's late-bound UXML control data (see LateBoundCarrier).
+            K2UI.LateBoundCarrier.Apply(new HarmonyLib.Harmony("K2D2.LateBoundCarrier"));
         }
 
         /// <summary>
@@ -235,7 +237,9 @@ namespace K2D2
             // struct whose public GameState field is what this code actually wants. Without this fix,
             // ValidScene() - which gates every per-frame pilot update - would throw a MissingMethodException
             // the instant it ran.
-            var state = GeneralTools.Game.GlobalGameState.GetGameState().GameState;
+            KSP.Game.GameState state;
+            try { state = GeneralTools.Game.GlobalGameState.GetGameState().GameState; }
+            catch (System.NullReferenceException) { return false; } // game state not set up yet (early load)
             bool is_valid = validScenes.Contains(state);
             if (!is_valid)
             {
