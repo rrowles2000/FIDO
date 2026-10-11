@@ -96,7 +96,7 @@ namespace K2D2.Landing
                 return;
             }
 
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
             var body = orbit.referenceBody;
 
             double now = GeneralTools.Current_UT;

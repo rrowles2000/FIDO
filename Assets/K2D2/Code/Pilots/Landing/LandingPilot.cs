@@ -271,9 +271,9 @@ namespace K2D2.Landing
 
             // VesselComponent.Orbit can be a CurrentPatchedConicsOrbit for the actively-flown
             // vessel, not just PatchedConicsOrbit, so a hard cast throws InvalidCastException.
-            // GetOrbitalVelocityAtUTZup is on IOrbit (which IKeplerPatch extends), so no concrete
+            // GetOrbitalVelocityAtUTZup is on IOrbit (which PatchedConicsOrbit extends), so no concrete
             // cast is needed here.
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
 
             collision_detected = compute_real_collision();
             speed_collision = orbit.GetOrbitalVelocityAtUTZup(adjusted_collision_UT).magnitude;
@@ -345,7 +345,7 @@ namespace K2D2.Landing
                 var current_vessel = K2D2_Plugin.Instance.current_vessel;
                 if (current_vessel != null)
                 {
-                    IKeplerPatch startBurn_orbit = current_vessel.VesselComponent.Orbit;
+                    PatchedConicsOrbit startBurn_orbit = current_vessel.VesselComponent.Orbit;
                     var startBurn_body = startBurn_orbit.referenceBody;
                     double startBurn_now = GeneralTools.Current_UT;
                     Vector3d startBurn_r0 = startBurn_orbit.GetRelativePositionAtUTZup(startBurn_now);
@@ -391,7 +391,7 @@ namespace K2D2.Landing
             //     about axis order.
             //  2. That swapped vector needs to be paired with
             //     body.SimulationObject.transform.celestialFrame, not body.coordinateSystem.
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
             var body = orbit.referenceBody;
             double current_time_ut = GeneralTools.Game.UniverseModel.UniverseTime;
             // Coarse step for the initial forward walk below, and the starting half-step size for

@@ -1,3 +1,4 @@
+using KSP.Sim.impl;
 using KSP.Sim;
 using KSP.Sim.Maneuver;
 using KSP2FlightAssistant.MathLibrary;
@@ -62,7 +63,7 @@ namespace K2D2.Lift
             // before, and avoids an uncommanded burn while TurnTo reorients toward the node.
             current_vessel.SetThrottle(0);
 
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
             var body = orbit.referenceBody;
 
             double now = GeneralTools.Current_UT;

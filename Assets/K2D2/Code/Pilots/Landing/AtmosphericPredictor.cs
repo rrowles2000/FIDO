@@ -107,7 +107,7 @@ namespace K2D2.Landing
         // how long the real descent should take, but see the performance note on the class - this
         // is not free.
         public static Result PredictImpact(
-            IKeplerPatch orbit,
+            PatchedConicsOrbit orbit,
             CelestialBodyComponent body,
             double startUT,
             double ballisticFactor,
@@ -123,7 +123,7 @@ namespace K2D2.Landing
         // evaluating a HYPOTHETICAL trajectory (a burn that hasn't happened, or wouldn't happen
         // until some future candidate time) rather than the vessel's actual current orbit.
         // LandingTargeting.cs's deorbit-burn search needs exactly this: it scores dozens of
-        // candidate burns per search, none of which are real orbits to hand in as an IKeplerPatch.
+        // candidate burns per search, none of which are real orbits to hand in as an PatchedConicsOrbit.
         // The orbit-based overload above is just this with r0/v0 read off the orbit at startUT.
         public static Result PredictImpact(
             Vector3d r0,
@@ -280,7 +280,7 @@ namespace K2D2.Landing
         // vesselMassTonnes: VesselComponent.totalMass - same kN-force/tonnes-mass convention used
         // everywhere else in this codebase.
         public static Result PredictImpact(
-            IKeplerPatch orbit,
+            PatchedConicsOrbit orbit,
             CelestialBodyComponent body,
             double startUT,
             VesselAeroLookup.AeroDragProfile dragProfile,

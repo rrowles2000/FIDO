@@ -33,7 +33,7 @@ namespace K2D2.Landing
 
         // Longitude (degrees) of the vessel's position at UT, using the same Zup->Yup swap and
         // body-relative Position construction as compute_real_collision(). "Raw" - see above.
-        public static double GetLongitudeAtUT(IKeplerPatch orbit, CelestialBodyComponent body, double UT)
+        public static double GetLongitudeAtUT(PatchedConicsOrbit orbit, CelestialBodyComponent body, double UT)
         {
             return RawLongitudeOfPosition(body, orbit.GetRelativePositionAtUTZup(UT));
         }
@@ -62,7 +62,7 @@ namespace K2D2.Landing
         // orbits). Semi-major axis from vis-viva (same formula as OrbitalPeriodFromStateVectors
         // above), apoapsis/periapsis radii from the standard eccentricity vector
         // (e = ((v^2 - mu/r) r - (r.v) v) / mu) rather than anything engine-specific - deliberately
-        // avoids IKeplerPatch/PatchedConicsOrbit member access entirely (unlike ManeuverCreator's
+        // avoids PatchedConicsOrbit/PatchedConicsOrbit member access entirely (unlike ManeuverCreator's
         // existing Circularize* methods, which read orbit.Apoapsis/orbit.Periapsis off a
         // "GetLastOrbit() as PatchedConicsOrbit" cast - the same cast pattern that throws
         // InvalidCastException for the actively-flown vessel under Redux, since its orbit is a
@@ -385,7 +385,7 @@ namespace K2D2.Landing
         // toward the nearest usable candidate instead.
         const double distance_penalty_per_second = 0.2;
 
-        public static bool FindBestDeorbitBurn(IKeplerPatch orbit, CelestialBodyComponent body,
+        public static bool FindBestDeorbitBurn(PatchedConicsOrbit orbit, CelestialBodyComponent body,
             double searchStartUT, double searchDuration, double targetPeriapsisRadius,
             double targetLatitudeDeg, double targetLongitudeDeg, double maxPlaneTrimDv,
             out double bestUT, out double bestDeltaV, out double bestNormalDeltaV,
@@ -618,7 +618,7 @@ namespace K2D2.Landing
             return true;
         }
 
-        static bool TryEvaluateCandidate(IKeplerPatch orbit, CelestialBodyComponent body, double candidateUT,
+        static bool TryEvaluateCandidate(PatchedConicsOrbit orbit, CelestialBodyComponent body, double candidateUT,
             double targetPeriapsisRadius, double targetLatitudeDeg, double targetLongitudeDeg, double dvNormal,
             out double dv, out double lon, out double lat, out double errorM, out double impactUT)
         {

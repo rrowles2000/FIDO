@@ -156,12 +156,12 @@ namespace K2D2.Lift
             if (current_vessel.VesselComponent == null)
                 return;
 
-            // Reads Apoapsis/referenceBody through the IKeplerPatch/IOrbit interface rather than
+            // Reads Apoapsis/referenceBody through the PatchedConicsOrbit/IOrbit interface rather than
             // casting to the concrete PatchedConicsOrbit type: Redux's ECS layer hands back
             // Redux.Ecs.Components.CurrentPatchedConicsOrbit for the actively-flown vessel, an
-            // unrelated sibling class that also implements IKeplerPatch, so a hard cast throws
+            // unrelated sibling class that also implements PatchedConicsOrbit, so a hard cast throws
             // InvalidCastException for exactly the vessel this autopilot is flying.
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
             ap_km = (float)(orbit.Apoapsis - orbit.referenceBody.radius) / 1000;
             current_altitude_km = (float)(current_vessel.GetSeaAltitude() / 1000);
 

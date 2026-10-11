@@ -28,7 +28,7 @@ namespace K2D2.Node
                 return null;
             }
 
-            // VERIFIED during Redux port verification: VesselComponent.Orbit is typed KSP.Sim.IKeplerPatch
+            // VERIFIED during Redux port verification: VesselComponent.Orbit is typed KSP.Sim.PatchedConicsOrbit
             // (an interface) in the current assemblies, not PatchedConicsOrbit directly - needs an explicit
             // cast, same as every other call site in this codebase that reads VesselComponent.Orbit.
             PatchedConicsOrbit orbit = (PatchedConicsOrbit)current_vessel.VesselComponent.Orbit;

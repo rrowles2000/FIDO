@@ -256,7 +256,7 @@ namespace K2D2.KSPService
 
         private IEnumerator CreateManeuverNode_Co(Vector3d burnVector, double TrueAnomaly)
         {
-            // FIXED during Redux port verification: VesselComponent.Orbit is typed KSP.Sim.IKeplerPatch in
+            // FIXED during Redux port verification: VesselComponent.Orbit is typed KSP.Sim.PatchedConicsOrbit in
             // the current assemblies, not PatchedConicsOrbit - an explicit cast is required (every other call
             // site in this file already does this via GetLastOrbit()'s "as PatchedConicsOrbit", this one was
             // the sole outlier that would not compile as-is).
@@ -304,7 +304,7 @@ namespace K2D2.KSPService
         /// dance, which hard-casts _vesselComponent.Orbit to PatchedConicsOrbit - and threw
         /// InvalidCastException every time, because under Redux the actively-flown vessel's
         /// Orbit is a Redux.Ecs.Components.CurrentPatchedConicsOrbit (an ECS-backed class that
-        /// implements the same interfaces - IKeplerPatch, IPatchedOrbit, etc. - but is NOT a
+        /// implements the same interfaces - PatchedConicsOrbit, IPatchedOrbit, etc. - but is NOT a
         /// PatchedConicsOrbit and can't be cast to one). Confirmed via ILSpy against the live
         /// Redux assembly, not guessed.
         ///
@@ -606,7 +606,7 @@ namespace K2D2.KSPService
                     _vesselComponent.Orbit
                         .GetRelativeOrbitNormal(); //GetOrbitalNormalVector(UT, inclination, longitudeOfAscendingNode);
             // VERIFIED during Redux port verification: ReferenceBodyConstants exists only on the concrete
-            // PatchedConicsOrbit class, not on the IKeplerPatch interface VesselComponent.Orbit is typed
+            // PatchedConicsOrbit class, not on the PatchedConicsOrbit interface VesselComponent.Orbit is typed
             // as - needs an explicit cast, unlike inclination/eccentricity/semiMajorAxis/etc. above which
             // are genuinely on the interface and compile fine as-is.
             Vector3d velocity = GetOrbitalPerifocalVelocityVector(UT, _vesselComponent.Orbit.eccentricity,

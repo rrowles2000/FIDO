@@ -1,3 +1,4 @@
+using KSP.Sim.impl;
 using KSP.Sim;
 using KSP.Sim.Maneuver;
 using KSP2FlightAssistant.MathLibrary;
@@ -61,7 +62,7 @@ namespace K2D2.Landing
             if (current_vessel == null)
                 return OrbitCheck.NoVessel;
 
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
             var body = orbit.referenceBody;
 
             double now = GeneralTools.Current_UT;
@@ -109,7 +110,7 @@ namespace K2D2.Landing
                 return;
             }
 
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
             var body = orbit.referenceBody;
 
             double now = GeneralTools.Current_UT;

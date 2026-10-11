@@ -20,7 +20,8 @@ namespace K2D2.UI
         // RegisterUIReloadCallback instead, which fires once immediately (the UI is already loaded
         // synchronously by the time Create returns) and again on any later live UI reload. Same
         // pattern KerbalAutopilot's MainAppWindow.cs uses for this Redux API.
-        private PanelRenderer _panel;
+        // Redux stable 0.2.8.5: Window.Create returns a UIDocument (PanelRenderer is a 0.2.9 / Unity 6000.5+ type).
+        private UIDocument _panel;
 
         // The elements of the window that we need to access
         private VisualElement _rootElement;
@@ -88,17 +89,19 @@ namespace K2D2.UI
         {
             L.Log("K2D2Window.OnEnable running");
 
-            _panel = GetComponent<PanelRenderer>();
+            _panel = GetComponent<UIDocument>();
             if (_panel == null)
             {
-                L.Log("K2D2Window.OnEnable: GetComponent<PanelRenderer>() returned null - the window's " +
-                      "GameObject doesn't have a PanelRenderer component. This should not happen given how " +
+                L.Log("K2D2Window.OnEnable: GetComponent<UIDocument>() returned null - the window's " +
+                      "GameObject doesn't have a UIDocument component. This should not happen given how " +
                       "Window.Create() is used in K2D2_Plugin.cs - if you see this, something upstream " +
                       "changed how the window GameObject is constructed.");
                 return;
             }
 
-            _panel.RegisterUIReloadCallback(OnUiReload);
+            // No UI-reload callback on stable; Window.Create has already built the tree.
+            if (_panel.rootVisualElement != null && _panel.rootVisualElement.childCount > 0)
+                OnUiReload(_panel, _panel.rootVisualElement);
 
             // RegisterUIReloadCallback should invoke OnUiReload synchronously here; log explicitly
             // if it didn't, rather than leaving it to be inferred from nothing happening.
@@ -115,7 +118,7 @@ namespace K2D2.UI
         /// then) and again on any later live UI reload. All the wiring that needs the real root
         /// VisualElement lives here instead of OnEnable for that reason.
         /// </summary>
-        private void OnUiReload(PanelRenderer panel, VisualElement root)
+        private void OnUiReload(UIDocument panel, VisualElement root)
         {
             L.Log("K2D2Window.OnUiReload running");
 

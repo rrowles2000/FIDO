@@ -1,3 +1,4 @@
+using KSP.Sim.impl;
 using K2D2.Controller;
 using K2D2.KSPService;
 using K2D2.Landing;
@@ -275,7 +276,7 @@ namespace K2D2.Node
 
             maneuver_creator.Update();
 
-            IKeplerPatch orbit = current_vessel.VesselComponent.Orbit;
+            PatchedConicsOrbit orbit = current_vessel.VesselComponent.Orbit;
             var body = orbit.referenceBody;
 
             double now = GeneralTools.Current_UT;

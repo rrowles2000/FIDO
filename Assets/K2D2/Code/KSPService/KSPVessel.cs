@@ -635,7 +635,7 @@ namespace K2D2.KSPService
         public double getCurrentOrbitSpeed()
         {
             // FIXED during Redux port verification: orbitalSpeed exists only on the concrete
-            // PatchedConicsOrbit class in the current assemblies, not on the IKeplerPatch interface
+            // PatchedConicsOrbit class in the current assemblies, not on the PatchedConicsOrbit interface
             // VesselComponent.Orbit is statically typed as - unlike the other getters in this file
             // (getApoapsis/getPeriapsis/getCurrenOrbitHeight/getEccentricity/getInclination), which all use
             // members that genuinely are on IOrbit/IKeplerOrbit and don't need a cast.
