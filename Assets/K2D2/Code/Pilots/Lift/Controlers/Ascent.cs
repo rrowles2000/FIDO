@@ -89,6 +89,7 @@ namespace K2D2.Lift
         public override void Start()
         {
             base.Start();
+            ResetDisposal();
 
             SASTool.setAutoPilot(AutopilotMode.StabilityAssist);
             last_ap_km = 0;
@@ -430,6 +431,11 @@ namespace K2D2.Lift
 
         public override void UpdateInfoRows(System.Action<string, string> addRow)
         {
+            if (settings.disposal_enabled.V)
+            {
+                addRow("Stage 1 Disposal", disposal_phase);
+                addRow("Periapsis Alt.", $"{pe_km:n2} km (target {settings.disposal_pe_km.V:n0})");
+            }
             addRow("Apoapsis Alt.", $"{ap_km:n2} km");
             addRow("Altitude", $"{current_altitude_km:n2} km");
             addRow("Climb Rate", $"{delta_ap_per_second:n2} km/s");
@@ -452,7 +458,350 @@ namespace K2D2.Lift
             }
         }
 
+        // ---------------------------------------------------------------- stage 1 disposal
+        // Profile climb at the max throttle until apoapsis reaches the target, then hold apoapsis
+        // and burn on (Stage1Guidance, the same law the optimiser simulated) until periapsis is up
+        // to disposal_pe_km. Then cut the engines and stage until the marked stage-1 separator has
+        // fired. If stage 1 runs dry first (periapsis stops rising), stage it and let the upper
+        // stage finish the job.
+
+        bool disposal_hold;
+        string disposal_phase = "";
+        float pe_km;
+        float last_pe_km;
+        float stall_time;
+        int separation_attempts;
+        double next_separation_ut;
+        bool disposal_cutoff;
+        KSP.Sim.impl.PartComponent stage1_separator;
+
+        void ResetDisposal()
+        {
+            separated = false;
+            ap_burn = false;
+            hold_throttle = 1f;
+            pitch_smoother.Reset();
+            disposal_hold = false;
+            disposal_cutoff = false;
+            disposal_phase = "Profile climb";
+            stall_time = 0;
+            separation_attempts = 0;
+            last_pe_km = float.NegativeInfinity;
+            stage1_separator = K2D2.Lift.Stage1.Stage1Model.FindMarkedSeparator(current_vessel.VesselComponent);
+            stage1_model = K2D2.Lift.Stage1.Stage1Model.Build(current_vessel.VesselComponent);
+            // No marked separator on board (already dropped, e.g. after a reload, or never marked):
+            // nothing to dispose of - fly the normal ascent instead of holding Ap with the upper stage.
+            if (stage1_separator == null)
+            {
+                separated = true;
+                disposal_phase = "No stage 1 separator on board - normal ascent";
+            }
+            next_log_ut = 0;
+            launch_ut = current_vessel.VesselComponent != null && current_vessel.VesselComponent.Landed ? -1 : GeneralTools.Current_UT;
+        }
+
+        K2D2.Lift.Stage1.Stage1Model stage1_model;
+        double next_log_ut;
+        double launch_ut = -1;
+
+        // Every 2 s in the atmosphere: real drag (the game's own per-part formula) next to the
+        // simulator's nose-first table, plus the heating proxy - to calibrate Stage1Sim.
+        void LogFlightCalibration(VesselComponent vessel, double now)
+        {
+            if (now < next_log_ut || stage1_model == null) return;
+            next_log_ut = now + 2;
+            var body = vessel.mainBody;
+            double alt = vessel.AltitudeFromSeaLevel;
+            if (!body.hasAtmosphere || alt > body.atmosphereDepth) return;
+            double p = body.GetPressure(alt);
+            double d = body.GetDensity(p, body.GetTemperature(alt));
+            double v = K2D2.Landing.VesselAeroLookup.GetReferencePartSpeed(vessel);
+            double a = d > 0 ? AeroUtilities.GetSoundSpeed(body.atmosphereAdiabaticIndex, p, d) : 0;
+            double mach = a > 0 ? v / a : 0;
+            double q = 0.5 * d * v * v;
+            AirState(vessel, out double path_deg, out _);
+            double nose = NoseElevationDeg();
+            double aoa = nose - path_deg; // flown, not commanded
+            double model_kN = stage1_model.AreaDragAt(mach, aoa) * PhysicsSettings.DragCubeMultiplier *
+                              PhysicsSettings.DragCurvePseudoReynolds.Evaluate((float)(d * v)) *
+                              PhysicsSettings.DragMultiplier * q * 0.001;
+            var real = K2D2.Landing.VesselAeroLookup.EvaluateVesselAeroReal(vessel);
+            if (launch_ut < 0 && !vessel.Landed) launch_ut = now;
+            logger.LogInfo($"[Stage1] flight T+{(launch_ut < 0 ? 0 : now - launch_ut):n0} alt {alt / 1000:n1} km, v {v:n0} m/s, M {mach:n2}, q {q / 1000:n1} kPa, " +
+                           $"drag real {real.totalForceEstimate:n1} kN / model {model_kN:n1} kN, " +
+                           $"heat {System.Math.Sqrt(d) * v * v * v / K2D2.Lift.Stage1.Stage1Optimiser.HeatLimit * 100:n0}%, " +
+                           $"cmd {wanted_elevation:n1}, nose {nose:n1}, path {path_deg:n1}, plane {(LaunchPlanePath(out double pp) ? pp : double.NaN):n1}, aoa {aoa:n1}, thr {current_vessel.GetThrottle():n2}, " +
+                           $"Ap {ap_km:n1} Pe {pe_km:n1}, mass {vessel.totalMass:n1} t");
+        }
+
+        bool SeparatorAttached()
+        {
+            var parts = current_vessel.VesselComponent?.SimulationObject?.PartOwner?.Parts;
+            if (stage1_separator == null || parts == null) return false;
+            foreach (var p in parts)
+                if (ReferenceEquals(p, stage1_separator)) return true;
+            return false;
+        }
+
+        void UpdateDisposal()
+        {
+            var vessel = current_vessel.VesselComponent;
+            var orbit = vessel?.Orbit;
+            if (orbit == null) return;
+            double now = GeneralTools.Current_UT;
+            double mu = orbit.referenceBody.gravParameter, R = orbit.referenceBody.radius;
+
+            if (disposal_cutoff)
+            {
+                // stage until the marked separator has fired (stage 1 may still have booster stages)
+                current_vessel.SetThrottle(0);
+                IntegrateRoll();
+                applyDirection();
+                if (SeparatorAttached() && separation_attempts < 6)
+                {
+                    if (now >= next_separation_ut)
+                    {
+                        vessel.ActivateNextStage();
+                        separation_attempts++;
+                        next_separation_ut = now + 0.5;
+                    }
+                    return;
+                }
+                disposal_cutoff = false;
+                separated = true;
+            }
+
+            // Stage 1 gone: the upper stage finishes the climb if apoapsis is still short, then
+            // hands over to Coasting/Adjust/Final, which coast to apoapsis and circularise there -
+            // the cheapest way to finish (that's what the optimiser scored).
+            if (separated || (stage1_separator != null && !SeparatorAttached()))
+            {
+                separated = true;
+                if (ap_km >= settings.destination_Ap_km.V - settings.end_ascent_error)
+                {
+                    disposal_phase = "Separated - coast to Ap";
+                    current_vessel.SetThrottle(0);
+                    finished = true;
+                    return;
+                }
+                disposal_phase = "Separated - upper stage climbing";
+                UpdateNormal();
+                return;
+            }
+
+            IntegrateRoll();
+            UpdateRollProgram();
+            finished = false;
+
+            Vector3d r = orbit.GetRelativePositionAtUTZup(now);
+            Vector3d v = orbit.GetOrbitalVelocityAtUTZup(now);
+            double rMag = r.magnitude;
+            double vr = Vector3d.Dot(v, r) / rMag;
+            double vt = System.Math.Sqrt(System.Math.Max(0, v.sqrMagnitude - vr * vr));
+            K2D2.Lift.Stage1.Stage1Guidance.ApPe(mu, rMag, vr, vt, out _, out double peR);
+            pe_km = (float)((peR - R) / 1000);
+
+            if (!disposal_hold && ap_km >= settings.destination_Ap_km.V - settings.end_ascent_error)
+            {
+                // Apoapsis above the atmosphere: cut the engines and hand over - Coasting warps up
+                // out of the air nose-prograde, then Stage1Burn plans and flies the apoapsis burn
+                // as a manoeuvre node.
+                var atmo_body = orbit.referenceBody;
+                if (!atmo_body.hasAtmosphere || orbit.Apoapsis > R + atmo_body.atmosphereDepth)
+                {
+                    logger.LogInfo($"[Ascent] disposal: Ap {ap_km:n1} km reached at {current_altitude_km:n1} km - coasting, stage-1 burn at apoapsis");
+                    current_vessel.SetThrottle(0);
+                    disposal_phase = "Ap reached - coasting";
+                    finished = true;
+                    return;
+                }
+                disposal_hold = true;
+                disposal_phase = "Holding Ap, raising Pe";
+                logger.LogInfo($"[Ascent] disposal: Ap reached at {current_altitude_km:n1} km, holding {settings.destination_Ap_km.V} km");
+            }
+            if (disposal_hold)
+                wanted_elevation = (float)K2D2.Lift.Stage1.Stage1Guidance.HoldElevationDeg(mu, rMag, vr, vt,
+                    R + settings.destination_Ap_km.V * 1000.0);
+            // keep the nose near the airflow while the air is thick (same limit the optimiser simulated);
+            // when that stops the hold steering, control apoapsis with the throttle instead
+            hold_throttle = 1f;
+            double target_ap_r = R + settings.destination_Ap_km.V * 1000.0;
+            if (AirState(vessel, out double path_deg, out double q_kpa, out double mach_now))
+            {
+                if (LaunchPlanePath(out double plane_path))
+                {
+                    path_deg = plane_path;
+                    if (!disposal_hold)
+                        wanted_elevation = (float)K2D2.Lift.Stage1.Stage1Guidance.FollowPath(wanted_elevation, path_deg);
+                }
+                if (disposal_hold)
+                    hold_throttle = K2D2.Lift.Stage1.Stage1Guidance.HoldThrottle(wanted_elevation, path_deg, q_kpa,
+                        orbit.Apoapsis, target_ap_r);
+                wanted_elevation = (float)K2D2.Lift.Stage1.Stage1Guidance.LimitAoA(wanted_elevation, path_deg, q_kpa, mach_now);
+            }
+
+            // Coast up to apoapsis (nose pre-pointed) and burn there, straddling it, rather than
+            // burning far below the horizon while still climbing - same rule the optimiser simulates.
+            if (disposal_hold && !ap_burn && stage1_model != null && stage1_model.valid)
+            {
+                var last = stage1_model.phases[stage1_model.phases.Count - 1];
+                var body = orbit.referenceBody;
+                double atmo_top_r = R + (body.hasAtmosphere ? body.atmosphereDepth : 0);
+                double cap_pe_r = R + settings.disposal_pe_km.V * 1000.0;
+                bool coast = K2D2.Lift.Stage1.Stage1Guidance.CoastToApoapsis(mu, rMag, vr, vt, orbit.Apoapsis, peR,
+                    atmo_top_r, cap_pe_r, vessel.totalMass, last.endMass, last.thrustVac * settings.max_throttle.V, last.ispVac);
+                if (coast)
+                {
+                    hold_throttle = 0;
+                    // point at the burn attitude (about horizontal at apoapsis) and stay there,
+                    // instead of following the burning-hold steering while coasting
+                    wanted_elevation = (float)K2D2.Lift.Stage1.Stage1Guidance.LimitAoA(0, path_deg, q_kpa, mach_now);
+                    double t_ap = K2D2.Lift.Stage1.Stage1Guidance.TimeToApoapsis(mu, rMag, vr, vt);
+                    double t_burn = K2D2.Lift.Stage1.Stage1Guidance.ApoapsisBurnTime(mu, orbit.Apoapsis, peR, cap_pe_r,
+                        vessel.totalMass, last.endMass, last.thrustVac * settings.max_throttle.V, last.ispVac);
+                    disposal_phase = $"Coasting to Ap - burn in {System.Math.Max(0, t_ap - t_burn / 2):n0} s ({t_burn:n0} s burn)";
+                }
+                else if (orbit.Apoapsis > atmo_top_r)
+                {
+                    ap_burn = true;
+                    disposal_phase = "Apoapsis burn";
+                    logger.LogInfo($"[Ascent] disposal: apoapsis burn starts at alt {current_altitude_km:n1} km, " +
+                                   $"T-{K2D2.Lift.Stage1.Stage1Guidance.TimeToApoapsis(mu, rMag, vr, vt):n0} s to Ap, Pe {pe_km:n1} km");
+                }
+            }
+
+            wanted_elevation = (float)pitch_smoother.Next(wanted_elevation, Time.deltaTime, q_kpa);
+            // Still turning towards the hold attitude: thrusting along the old one pumps apoapsis up
+            // (the 2026-10-20 flight overshot 85 -> 101 km like this), so throttle on apoapsis until
+            // the nose is within 5° of where it should be.
+            nose_elevation = NoseElevationDeg();
+            if (disposal_hold && hold_throttle > 0 && System.Math.Abs(nose_elevation - wanted_elevation) > 5)
+                hold_throttle = System.Math.Min(hold_throttle,
+                    K2D2.Lift.Stage1.Stage1Guidance.ApThrottle(orbit.Apoapsis, target_ap_r));
+
+            applyDirection();
+            wanted_throttle = settings.max_throttle.V * hold_throttle;
+            LogFlightCalibration(vessel, now);
+            current_vessel.SetThrottle(wanted_throttle);
+
+            // periapsis cap: stop so stage 1 still comes back down
+            if (disposal_hold && pe_km >= settings.disposal_pe_km.V)
+            {
+                logger.LogInfo($"[Ascent] disposal: MECO at Pe cap {pe_km:n1} km, Ap {ap_km:n1} km, alt {current_altitude_km:n1} km");
+                StartSeparation(now, "MECO at Pe cap - separating");
+                return;
+            }
+
+            // stage 1 dry? the orbit stops growing at full throttle (Pe while holding, Ap before)
+            float watched = disposal_hold ? pe_km : ap_km;
+            if (hold_throttle < 0.5f) stall_time = 0; // coasting on purpose, not burnt out
+            else if (Time.deltaTime > 0 && last_pe_km > float.NegativeInfinity)
+            {
+                float rate = (watched - last_pe_km) / Time.deltaTime;
+                stall_time = rate < 0.005f ? stall_time + Time.deltaTime : 0;
+                if (stall_time > 3)
+                {
+                    stall_time = 0;
+                    logger.LogInfo($"[Ascent] disposal: stage 1 dry at Ap {ap_km:n1} Pe {pe_km:n1} km, alt {current_altitude_km:n1} km");
+                    StartSeparation(now, "Stage 1 dry - separating");
+                    return;
+                }
+            }
+            last_pe_km = watched;
+        }
+
+        bool separated;
+        float hold_throttle = 1f;
+        bool ap_burn;
+        double nose_elevation;
+        readonly K2D2.Lift.Stage1.Stage1Guidance.PitchSmoother pitch_smoother = new();
+
+        // Where the nose actually points: degrees above the local horizon.
+        double NoseElevationDeg()
+        {
+            var vehicle = current_vessel.VesselVehicle;
+            if (vehicle == null) return wanted_elevation;
+            Rotation rot = Rotation.Reframed(current_vessel.GetRotation(), vehicle.Up.coordinateSystem);
+            Vector3d nose = (rot.localRotation * Vector3.up).normalized;
+            Vector3d up = vehicle.Up.vector.normalized;
+            return System.Math.Asin(System.Math.Max(-1, System.Math.Min(1, Vector3d.Dot(nose, up)))) * 180 / System.Math.PI;
+        }
+
+        // Flight path angle in the launch plane, signed: built in the same HorizonUp frame and from
+        // the same Euler(-elevation, heading) convention applyDirection steers with, so above 90
+        // means leaning back against the heading.
+        bool LaunchPlanePath(out double pathDeg)
+        {
+            pathDeg = 90;
+            var vehicle = current_vessel.VesselVehicle;
+            var telemetry = SASTool.getTelemetry();
+            if (vehicle == null || telemetry == null) return false;
+            var frame = telemetry.HorizonUp.coordinateSystem;
+            Vector3d sv = Vector.Reframed(vehicle.SurfaceVelocity, frame).vector;
+            if (sv.magnitude < 10) return false;
+            Vector3d along = QuaternionD.Euler(0, settings.heading.V, 0) * Vector3d.forward;
+            Vector3d up = QuaternionD.Euler(-90, settings.heading.V, 0) * Vector3d.forward;
+            pathDeg = System.Math.Atan2(Vector3d.Dot(sv, up), Vector3d.Dot(sv, along)) * 180 / System.Math.PI;
+            return true;
+        }
+
+        // Surface-relative flight path angle (deg above the horizon) and dynamic pressure (kPa).
+        bool AirState(VesselComponent vessel, out double pathDeg, out double qKPa) => AirState(vessel, out pathDeg, out qKPa, out _);
+
+        bool AirState(VesselComponent vessel, out double pathDeg, out double qKPa, out double mach)
+        {
+            pathDeg = 90; qKPa = 0; mach = 0;
+            var vehicle = current_vessel.VesselVehicle;
+            if (vehicle == null) return false;
+            var up_coords = vehicle.Up.coordinateSystem;
+            Vector3d sv = Vector.Reframed(vehicle.SurfaceVelocity, up_coords).vector;
+            Vector3d up = vehicle.Up.vector.normalized;
+            double speed = sv.magnitude;
+            if (speed < 5) return false;
+            pathDeg = System.Math.Asin(System.Math.Max(-1, System.Math.Min(1, Vector3d.Dot(sv, up) / speed))) * 180 / System.Math.PI;
+            var body = vessel.mainBody;
+            double alt = vessel.AltitudeFromSeaLevel;
+            if (body.hasAtmosphere && alt < body.atmosphereDepth)
+            {
+                double p = body.GetPressure(alt);
+                double d = body.GetDensity(p, body.GetTemperature(alt));
+                qKPa = 0.0005 * d * speed * speed;
+                double a = d > 0 ? AeroUtilities.GetSoundSpeed(body.atmosphereAdiabaticIndex, p, d) : 0;
+                mach = a > 0 ? speed / a : 0;
+            }
+            return true;
+        }
+
+        void StartSeparation(double now, string phase)
+        {
+            disposal_phase = phase;
+            disposal_cutoff = true;
+            separation_attempts = 0;
+            next_separation_ut = now + 0.3;
+            current_vessel.SetThrottle(0);
+            // a stage with no separator mark: just stage once
+            if (stage1_separator == null)
+            {
+                current_vessel.VesselComponent.ActivateNextStage();
+                separated = true;
+                disposal_cutoff = false;
+            }
+        }
+
         public override void Update()
+        {
+            if (settings.disposal_enabled.V)
+            {
+                UpdateDisposal();
+                return;
+            }
+            if (current_vessel.VesselComponent != null)
+                LogFlightCalibration(current_vessel.VesselComponent, GeneralTools.Current_UT);
+            UpdateNormal();
+        }
+
+        // The standard Lift ascent: profile pitch, throttle eased off as apoapsis nears the target.
+        void UpdateNormal()
         {
             IntegrateRoll();
             UpdateRollProgram();

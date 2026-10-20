@@ -55,6 +55,8 @@ namespace K2D2.Lift
             var heading = panel.Q<K2Compass>("heading").Bind(settings.heading);
 
             BuildPolarLaunch(panel.Q<Foldout>("profile"), settings);
+            stage1_ui = new K2D2.Lift.Stage1.Stage1UI(settings);
+            stage1_ui.Build(panel);
 
             var graph = panel.Q<VisualElement>("graph");
             pilot.ascent_path.InitUI(graph);
@@ -85,6 +87,8 @@ namespace K2D2.Lift
 
             return true;
         }
+
+        K2D2.Lift.Stage1.Stage1UI stage1_ui;
 
         Label polar_hint;
 

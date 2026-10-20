@@ -69,7 +69,8 @@ namespace K2D2.Lift
 
         public override void Update()
         {
-            if (!lift_settings.coasting_warp.V)
+            // stage-1 disposal always warps the coast (nose surface-prograde, least drag)
+            if (!lift_settings.coasting_warp.V && !lift_settings.disposal_enabled.V)
                 lift.NextMode();
 
             current_altitude_km = (float)(current_vessel.GetSeaAltitude() / 1000);
@@ -111,7 +112,8 @@ namespace K2D2.Lift
                 // default) FinalCircularize now creates and flies the circularize burn itself
                 // (see Final.cs), so there's nothing left for the player to manually do here and
                 // no reason to interrupt the flight.
-                if (!lift_settings.auto_circularize.V && lift_settings.pause_on_final.V)
+                // stage-1 disposal still has its apoapsis burn to do (Stage1Burn) - don't pause here
+                if (!lift_settings.auto_circularize.V && lift_settings.pause_on_final.V && !lift_settings.disposal_enabled.V)
                 {
                     TimeWarpTools.SetRateIndex(0, false);
                     TimeWarpTools.SetIsPaused(true);

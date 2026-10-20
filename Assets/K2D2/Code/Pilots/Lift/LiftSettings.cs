@@ -61,6 +61,13 @@ namespace K2D2.Lift
             get => destination_Ap_km.V * end_ascent_pc.V/100;
         }
 
+        // STAGE 1 DISPOSAL (Stage1/Stage1UI.cs): once apoapsis reaches the target, keep it there and
+        // burn on to raise periapsis to disposal_pe_km, then cut the engines and stage the marked
+        // stage-1 separator. Stage 1 drops away on that orbit and decays in the atmosphere.
+        public Setting<bool> disposal_enabled = new ("lift.disposal_enabled", false);
+        public ClampSetting<float> disposal_pe_km = new ("lift.disposal_pe_km", 45, 0, 1000);
+        public Setting<bool> optimise_throttle = new ("lift.optimise_throttle", false);
+
         public Setting<bool> coasting_warp = new ("lift.coasting_warp", true);
         public Setting<bool> adjust = new ("lift.adjust", true);
         public ClampSetting<float> end_adjust_pc = new ("lift.end_adjust_pc", 0.01f, 0.001f, 0.5f);

@@ -14,6 +14,7 @@ namespace K2D2.Lift
             Off,
             Ascent,
             Coasting,
+            Stage1Burn,
             Adjust,
             Circularize
         }
@@ -33,7 +34,8 @@ namespace K2D2.Lift
         // sub pilots
         internal Ascent ascent = null;
         Adjust adjust = null;
-        Coasting coasting = null;   
+        Coasting coasting = null;
+        Stage1Burn stage1_burn = null;
         FinalCircularize final_circularize;
 
         public ExecuteController current_subpilot = null;
@@ -49,6 +51,7 @@ namespace K2D2.Lift
             ascent = new Ascent(settings, ascent_path);
             adjust = new Adjust(settings, ascent);
             coasting = new Coasting(this, settings);
+            stage1_burn = new Stage1Burn(this, settings);
             final_circularize = new FinalCircularize(this, settings);
         
             Instance = this;
@@ -95,6 +98,9 @@ namespace K2D2.Lift
                         break;
                     case LiftStatus.Coasting:
                         current_subpilot = coasting;
+                        break;
+                    case LiftStatus.Stage1Burn:
+                        current_subpilot = stage1_burn;
                         break;
                     case LiftStatus.Adjust:
                         current_subpilot = adjust;

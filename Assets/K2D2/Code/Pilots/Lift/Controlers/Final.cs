@@ -83,6 +83,22 @@ namespace K2D2.Lift
             double v_circular = VisVivaEquation.CalculateVelocity(apoapsisRadius, apoapsisRadius, apoapsisRadius, body.gravParameter);
             double deltaV = v_circular - v_apoapsis;
 
+            // Just past apoapsis (e.g. after stage-1 disposal's apoapsis burn): waiting for the next
+            // apoapsis means first passing periapsis - on 2026-10-20 that was 49 km, inside the
+            // atmosphere, and the upper stage burned up. If periapsis comes first, circularise
+            // shortly instead, at the radius the vessel will be at then.
+            if (time_to_apoapsis > period / 2)
+            {
+                const double lead_s = 30; // time to turn onto the node
+                burn_UT = now + lead_s;
+                Vector3d r_b = orbit.GetRelativePositionAtUTZup(burn_UT);
+                Vector3d v_b = orbit.GetOrbitalVelocityAtUTZup(burn_UT);
+                double v_circ_b = System.Math.Sqrt(body.gravParameter / r_b.magnitude);
+                deltaV = System.Math.Max(0, v_circ_b - v_b.magnitude);
+                logger.LogInfo($"[FinalCircularize] past apoapsis (next one in {time_to_apoapsis:n0} s, periapsis first) - " +
+                               $"circularising in {lead_s:n0} s at {(r_b.magnitude - body.radius) / 1000:n1} km instead");
+            }
+
             logger.LogInfo($"[FinalCircularize] now={now:n1} apoapsis={apoapsisRadius:n0} periapsis={periapsisRadius:n0} " +
                 $"body={body.Name} period={period:n1}s time_to_apoapsis={time_to_apoapsis:n1}s | " +
                 $"burn_UT={burn_UT:n1} (T+{burn_UT - now:n1}s) deltaV={deltaV:n2}m/s");
