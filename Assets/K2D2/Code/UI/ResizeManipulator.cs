@@ -49,9 +49,15 @@ namespace K2D2.UI
         // Placeholder bounds, tunable to taste. Below MinHeight the window would start clipping
         // its own header/toolbar; above MaxHeight it stops being a compact overlay panel.
         public float MinHeight { get; set; } = 250;
-        public float MaxHeight { get; set; } = 900;
+        // the screen-bottom clamp in ApplyHeight is the real limit; this only stops runaway values
+        public float MaxHeight { get; set; } = 2000;
+        public float MinWidth { get; set; } = 300;
+        public float MaxWidth { get; set; } = 1200;
 
         Setting<float> size_setting;
+        Setting<float> width_setting;
+        private float _pointerStartX;
+        private float _widthStart;
         const float invalid_height = -1f;
 
         private float _pointerStartY;
@@ -106,10 +112,15 @@ namespace K2D2.UI
             _resizeTarget = resizeTarget;
 
             if (save_setting != null)
+            {
                 size_setting = new Setting<float>(save_setting, invalid_height);
+                width_setting = new Setting<float>(save_setting + "_width", invalid_height);
+            }
 
             if (size_setting != null && size_setting.V != invalid_height)
                 ApplyHeight(size_setting.V);
+            if (width_setting != null && width_setting.V != invalid_height)
+                ApplyWidth(width_setting.V);
         }
 
         /// <summary>
@@ -152,6 +163,14 @@ namespace K2D2.UI
             _resizeTarget.MarkDirtyRepaint();
         }
 
+        void ApplyWidth(float width)
+        {
+            width = Mathf.Clamp(width, MinWidth, MaxWidth);
+            width = Mathf.Min(width, Configuration.CurrentScreenWidth - _resizeTarget.resolvedStyle.left);
+            _resizeTarget.style.width = width;
+            _resizeTarget.MarkDirtyRepaint();
+        }
+
         private void OnPointerDown(PointerDownEvent evt)
         {
             if (!IsEnabled) return;
@@ -174,6 +193,8 @@ namespace K2D2.UI
             // DragManipulator's localPosition-based math can for a window that only translates.
             _pointerStartY = evt.position.y;
             _heightStart = _resizeTarget.resolvedStyle.height;
+            _pointerStartX = evt.position.x;
+            _widthStart = _resizeTarget.resolvedStyle.width;
 
             _target.CapturePointer(evt.pointerId);
             L.Log($"ResizeManipulator: PointerDown id={evt.pointerId} y={_pointerStartY} " +
@@ -197,12 +218,13 @@ namespace K2D2.UI
             evt.StopPropagation();
 
             float deltaY = evt.position.y - _pointerStartY;
+            float deltaX = evt.position.x - _pointerStartX;
 
             // Don't commit to resizing until the drag clears a small threshold - see _pointerDown's
             // comment. Once it does, treat it like the drag started right here so there's no jump.
             if (!IsResizing)
             {
-                if (Mathf.Abs(deltaY) < DragThresholdPx)
+                if (Mathf.Abs(deltaY) < DragThresholdPx && Mathf.Abs(deltaX) < DragThresholdPx)
                     return;
 
                 IsResizing = true;
@@ -216,6 +238,7 @@ namespace K2D2.UI
                       $"height={_resizeTarget.resolvedStyle.height}");
 
             ApplyHeight(_heightStart + deltaY);
+            ApplyWidth(_widthStart + deltaX);
         }
 
         private void OnPointerUp(PointerUpEvent evt)
@@ -263,6 +286,8 @@ namespace K2D2.UI
 
             if (wasResizing && size_setting != null)
                 size_setting.V = _resizeTarget.resolvedStyle.height;
+            if (wasResizing && width_setting != null)
+                width_setting.V = _resizeTarget.resolvedStyle.width;
         }
     }
 }
