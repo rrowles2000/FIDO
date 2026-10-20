@@ -140,6 +140,7 @@ namespace K2D2
             pilots_manager.AddPilot(new LandingPilot());
             pilots_manager.AddPilot(new DockingPilot());
             pilots_manager.AddPilot(new AttitudePilot());
+            pilots_manager.AddPilot(new K2D2.Constellation.ConstellationPilot());
 
             // pilots_manager.AddPilot(new DronePilot());
             // pilots_manager.AddPilot(new AttitudePilot());

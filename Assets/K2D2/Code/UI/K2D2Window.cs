@@ -170,6 +170,30 @@ namespace K2D2.UI
                       "as a TabbedPage. Stopping here, the rest of the window's controls will not be wired up.");
                 return;
             }
+            // The Sats tab has no UXML in the bundle - add its page before About so the tab bar
+            // builds a button for it like the others.
+            if (tab_page.Q<TabPage>(K2D2.Constellation.ConstellationUI.Code) == null)
+            {
+                var content = tab_page.contentContainer;
+                var about = content.Q<VisualElement>("about");
+                int index = about != null ? content.IndexOf(about) : content.childCount;
+                var sats = K2D2.Constellation.ConstellationUI.CreateTabPage();
+                sats.style.display = DisplayStyle.None;
+                content.Insert(index < 0 ? content.childCount : index, sats);
+
+                // The UXML-built pages carry their own stylesheets (K2Toggle, K2Slider,
+                // ToggleButton...) on their TemplateContainers; give the code-built page the same set.
+                foreach (var page in content.Query<TabPage>().ToList())
+                {
+                    for (var el = page as VisualElement; el != null && el != content; el = el.parent)
+                        for (int i = 0; i < el.styleSheets.count; i++)
+                        {
+                            var sheet = el.styleSheets[i];
+                            if (!sats.styleSheets.Contains(sheet))
+                                sats.styleSheets.Add(sheet);
+                        }
+                }
+            }
             tab_page.Init(all_panels);
             // save the current_tab to settings
             tab_page.Bind("main_page", "node");
