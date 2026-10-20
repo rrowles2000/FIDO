@@ -54,6 +54,8 @@ namespace K2D2.Lift
             heading_label = panel.Q<Label>("heading_label");
             var heading = panel.Q<K2Compass>("heading").Bind(settings.heading);
 
+            BuildPolarLaunch(panel.Q<Foldout>("profile"), settings);
+
             var graph = panel.Q<VisualElement>("graph");
             pilot.ascent_path.InitUI(graph);
 
@@ -82,6 +84,61 @@ namespace K2D2.Lift
             addResetButton(panel.Q<Foldout>("advanced_foldout"), "lift");
 
             return true;
+        }
+
+        Label polar_hint;
+
+        // POLAR LAUNCH: works out the launch heading for a chosen inclination (90° = polar) from
+        // the pad's latitude, the target orbit speed and the planet's rotation, and writes it into
+        // the Heading compass above. Built in code since the bundle's Lift.uxml has no slot for it.
+        void BuildPolarLaunch(Foldout profile, LiftSettings settings)
+        {
+            if (profile == null) return;
+
+            var polar = new Foldout { text = "POLAR LAUNCH", value = false };
+            var heading_row = profile.Q<VisualElement>("heading_row");
+            int index = heading_row != null ? profile.contentContainer.IndexOf(heading_row) : -1;
+            if (index >= 0) profile.contentContainer.Insert(index, polar);
+            else profile.Add(polar);
+
+            var inc_field = new FloatField("Inclination (°)") { isDelayed = true };
+            inc_field.Bind(settings.polar_inclination);
+            polar.Add(inc_field);
+
+            var south = new K2Toggle("Launch southward");
+            south.Bind(settings.polar_south);
+            polar.Add(south);
+
+            var set_button = new Button(() => ApplyPolarHeading(settings)) { text = "Set launch heading" };
+            set_button.style.height = 26;
+            polar.Add(set_button);
+
+            polar_hint = new Label();
+            polar_hint.AddToClassList("k2-slider-value-label");
+            polar_hint.style.whiteSpace = WhiteSpace.Normal;
+            polar.Add(polar_hint);
+        }
+
+        bool PolarHeading(LiftSettings settings, out double heading, out bool reachable)
+        {
+            heading = 0;
+            reachable = false;
+            var vessel = K2D2_Plugin.Instance.current_vessel?.VesselComponent;
+            var body = vessel?.mainBody;
+            if (body == null) return false;
+
+            double orbit_speed = K2D2.Constellation.OrbitMath.CircularSpeed(body.gravParameter,
+                body.radius + settings.destination_Ap_km.V * 1000.0);
+            double surface_speed = K2D2.Constellation.OrbitMath.EquatorialSurfaceSpeed(body);
+            reachable = K2D2.Constellation.OrbitMath.LaunchHeading(settings.polar_inclination.V, vessel.Latitude,
+                orbit_speed, surface_speed, !settings.polar_south.V, out heading);
+            return true;
+        }
+
+        void ApplyPolarHeading(LiftSettings settings)
+        {
+            if (PolarHeading(settings, out double heading, out _))
+                settings.heading.V = (float)heading;
         }
 
         void AddInfoRow(string label, string value)
@@ -125,6 +182,15 @@ namespace K2D2.Lift
             end_rotate_ratio.ValueText = $"{settings.end_rotate_altitude_km:n0} km";
             mid_rotate_ratio.ValueText = $"{settings.mid_rotate_altitude_km:n0} km";
             heading_label.text = $"{settings.heading.V:n1} °";
+
+            if (polar_hint != null)
+            {
+                if (PolarHeading(settings, out double polar_heading, out bool reachable))
+                    polar_hint.text = $"Heading {polar_heading:n1}° for {settings.polar_inclination.V:n1}° at {settings.destination_Ap_km.V} km" +
+                        (reachable ? "" : " (closest reachable from this latitude)");
+                else
+                    polar_hint.text = "";
+            }
 
             final_grp.Show(false);
 

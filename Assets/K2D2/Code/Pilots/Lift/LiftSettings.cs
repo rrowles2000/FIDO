@@ -8,6 +8,10 @@ namespace K2D2.Lift
     public class LiftSettings
     {
         public ClampSetting<float> heading = new ("lift.heading", 90,  0 , 360);
+
+        // Polar launch helper (LiftUI's POLAR LAUNCH foldout): target inclination and which way to go
+        public ClampSetting<float> polar_inclination = new ("lift.polar_inclination", 90, 0, 180);
+        public Setting<bool> polar_south = new ("lift.polar_south", false);
  
         public Setting<int> start_altitude_km = new ("lift.start_altitude_km", 2);
 
