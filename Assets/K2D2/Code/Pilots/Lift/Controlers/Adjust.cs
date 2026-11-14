@@ -16,14 +16,14 @@ namespace K2D2.Lift
     public class Adjust : ExecuteController
     {
         LiftSettings lift_settings = null;
-        Ascent ascent = null;
+        AscentBase ascent = null;
 
         TurnTo turn_to = null;
         KSPVessel current_vessel;
 
         float wanted_throttle = 0;
 
-        public Adjust(LiftSettings lift_settings, Ascent ascent)
+        public Adjust(LiftSettings lift_settings, AscentBase ascent)
         {
             current_vessel = K2D2_Plugin.Instance.current_vessel;
             this.lift_settings = lift_settings;

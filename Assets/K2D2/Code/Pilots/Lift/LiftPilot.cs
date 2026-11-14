@@ -31,12 +31,19 @@ namespace K2D2.Lift
 
         Vector3d direction = Vector3d.zero;
 
-        // sub pilots
-        internal Ascent ascent = null;
-        Adjust adjust = null;
-        Coasting coasting = null;
+        // One pipeline (status -> sub pilot) per lift system, see LiftSettings.LiftMode. A status a
+        // system has no entry for is skipped (Classic and New have no Stage1Burn).
+        readonly System.Collections.Generic.Dictionary<LiftMode, System.Collections.Generic.Dictionary<LiftStatus, ExecuteController>> pipelines = new();
+        readonly System.Collections.Generic.Dictionary<LiftMode, AscentBase> ascents = new();
+
         Stage1Burn stage1_burn = null;
-        FinalCircularize final_circularize;
+
+        // the system flying the current run; fixed at start so switching the selector mid-flight
+        // can't swap controllers under the vessel
+        LiftMode active_mode;
+        internal LiftMode mode => isRunning ? active_mode : settings.mode.V;
+
+        internal AscentBase ascent => ascents[mode];
 
         public ExecuteController current_subpilot = null;
 
@@ -48,17 +55,66 @@ namespace K2D2.Lift
 
             current_vessel = K2D2_Plugin.Instance.current_vessel;
        
-            ascent = new Ascent(settings, ascent_path);
-            adjust = new Adjust(settings, ascent);
-            coasting = new Coasting(this, settings);
-            stage1_burn = new Stage1Burn(this, settings);
-            final_circularize = new FinalCircularize(this, settings);
-        
+            BuildPipelines();
+
             Instance = this;
 
             debug_mode_only = false;
 
             K2D2PilotsMgr.Instance.RegisterPilot("Lift", this);
+        }
+
+        void BuildPipelines()
+        {
+            // Classic - the original K2-D2 ascent (Classic/), unchanged
+            var classic_ascent = new Classic.AscentClassic(settings, ascent_path);
+            ascents[LiftMode.Classic] = classic_ascent;
+            pipelines[LiftMode.Classic] = new()
+            {
+                [LiftStatus.Ascent] = classic_ascent,
+                [LiftStatus.Coasting] = new Classic.CoastingClassic(this, settings),
+                [LiftStatus.Adjust] = new Adjust(settings, classic_ascent),
+                [LiftStatus.Circularize] = new Classic.FinalCircularizeClassic(this, settings),
+            };
+
+            // Optimiser - our system (Controlers/ + Stage1/)
+            var ascent_opt = new Ascent(settings, ascent_path);
+            stage1_burn = new Stage1Burn(this, settings);
+            ascents[LiftMode.Optimiser] = ascent_opt;
+            pipelines[LiftMode.Optimiser] = new()
+            {
+                [LiftStatus.Ascent] = ascent_opt,
+                [LiftStatus.Coasting] = new Coasting(this, settings),
+                [LiftStatus.Stage1Burn] = stage1_burn,
+                [LiftStatus.Adjust] = new Adjust(settings, ascent_opt),
+                [LiftStatus.Circularize] = new FinalCircularize(this, settings),
+            };
+
+            // New - the third system, being developed in Next/ (Phase 0: layered loop flown with
+            // the Optimiser's guidance as its policy). It hands over to the Classic coast - which,
+            // unlike ours, ignores the stage-1 disposal flag the New system doesn't use - and to
+            // our FinalCircularize, which has the past-apoapsis fix.
+            var ascent_next = new Next.AscentNext(this, settings);
+            ascents[LiftMode.New] = ascent_next;
+            pipelines[LiftMode.New] = new()
+            {
+                [LiftStatus.Ascent] = ascent_next,
+                [LiftStatus.Coasting] = new Classic.CoastingClassic(this, settings),
+                // stage 1's leftover burned at apoapsis, then separation (LiftSettings.next_s1_ap_burn)
+                [LiftStatus.Stage1Burn] = new Stage1Burn(this, settings),
+                [LiftStatus.Adjust] = new Adjust(settings, ascent_next),
+                [LiftStatus.Circularize] = new FinalCircularize(this, settings),
+            };
+        }
+
+        // first status at or after `from` that the active system has a sub pilot for (Off if none)
+        LiftStatus FirstAvailable(LiftStatus from)
+        {
+            var pipeline = pipelines[active_mode];
+            for (var s = from; s != LiftStatus.Off; s = s.Next())
+                if (pipeline.ContainsKey(s))
+                    return s;
+            return LiftStatus.Off;
         }
 
         public override void onReset()
@@ -79,6 +135,8 @@ namespace K2D2.Lift
                 {
                     case LiftStatus.Off:
                     {
+                        if (active_mode == LiftMode.New && ascents.TryGetValue(LiftMode.New, out var next_ascent))
+                            (next_ascent as Next.AscentNext)?.LogFlightResult(result_ok, end_status, last_circ_dv, last_s1_burn_dv, last_s1_sep_ap, last_s1_sep_pe);
                         // stop
                         if (current_vessel != null)
                         {
@@ -93,20 +151,8 @@ namespace K2D2.Lift
                         current_subpilot = null;
                     }
                         break;
-                    case LiftStatus.Ascent:
-                        current_subpilot = ascent;
-                        break;
-                    case LiftStatus.Coasting:
-                        current_subpilot = coasting;
-                        break;
-                    case LiftStatus.Stage1Burn:
-                        current_subpilot = stage1_burn;
-                        break;
-                    case LiftStatus.Adjust:
-                        current_subpilot = adjust;
-                        break;
-                    case LiftStatus.Circularize:
-                        current_subpilot = final_circularize;
+                    default:
+                        pipelines[active_mode].TryGetValue(value, out current_subpilot);
                         break;
                 }
 
@@ -135,14 +181,48 @@ namespace K2D2.Lift
                 }
 
                 // send call backs
-                base.isRunning = value; 
+                base.isRunning = value;
+                // the chosen system had nothing to fly from start_status (OnStartController left
+                // it Off) - report the stop too, so the Start button doesn't stay latched
+                if (value && !isRunning)
+                    base.isRunning = false;
             }
         }
 
+        LiftStatus start_status = LiftStatus.Ascent;
+
         void OnStartController()
         {
-            status = LiftStatus.Ascent;
+            result_ok = false;
+            end_status = "";
+            active_mode = settings.mode.V;
+            last_circ_dv = 0;
+            last_s1_burn_dv = -1;
+            last_s1_sep_ap = last_s1_sep_pe = double.NaN;
+            logger.LogInfo($"[Lift] starting with the {active_mode} lift system");
+            var first = FirstAvailable(start_status);
+            if (first == LiftStatus.Off)
+                end_status = $"The {active_mode} lift system has no {start_status} step";
+            status = first;
         }
+
+        /// <summary>Starts the pilot part-way through (the Mission tab's Circularise step starts at Adjust).</summary>
+        public void StartAt(LiftStatus first)
+        {
+            if (isRunning) return;
+            start_status = first;
+            isRunning = true;
+            start_status = LiftStatus.Ascent;
+        }
+
+        internal Stage1Burn Stage1 => stage1_burn;
+
+        // the circularisation burn FinalCircularize planned this run (for the New system's summary)
+        internal double last_circ_dv;
+        // the stage-1 apoapsis burn Stage1Burn planned this run (-1: it didn't run)
+        internal double last_s1_burn_dv = -1;
+        // the orbit when stage 1 separated (Stage1Burn), km; NaN = it didn't
+        internal double last_s1_sep_ap = double.NaN, last_s1_sep_pe = double.NaN;
 
         internal bool result_ok = false;
         internal string end_status;
@@ -168,7 +248,15 @@ namespace K2D2.Lift
 
         public void NextMode()
         {
-            status = status.Next();
+            // a system that has no sub pilot for the next status skips it; past the last one
+            // the run is over (Next() wraps round to Off)
+            var next = status.Next();
+            if (next != LiftStatus.Off)
+                next = FirstAvailable(next);
+            if (next == LiftStatus.Off)
+                EndLiftPilot(true, end_status);
+            else
+                status = next;
         }
 
         public override void Update()

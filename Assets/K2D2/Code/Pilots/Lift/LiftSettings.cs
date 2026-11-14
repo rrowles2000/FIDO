@@ -5,8 +5,21 @@ using UnityEngine.UIElements;
 
 namespace K2D2.Lift
 {
+    /// <summary>Which lift system flies the ascent (Lift tab's LIFT SYSTEM selector).</summary>
+    public enum LiftMode
+    {
+        // the original K2-D2 Redux ascent, frozen in Classic/
+        Classic,
+        // our system: Controlers/ - stage-1 disposal optimiser, past-apoapsis circularise fix
+        Optimiser,
+        // the third system, under development in Next/
+        New
+    }
+
     public class LiftSettings
     {
+        public EnumSetting<LiftMode> mode = new ("lift.mode", LiftMode.Optimiser);
+
         public ClampSetting<float> heading = new ("lift.heading", 90,  0 , 360);
 
         // Polar launch helper (LiftUI's POLAR LAUNCH foldout): target inclination and which way to go
@@ -67,6 +80,53 @@ namespace K2D2.Lift
         public Setting<bool> disposal_enabled = new ("lift.disposal_enabled", false);
         public ClampSetting<float> disposal_pe_km = new ("lift.disposal_pe_km", 45, 0, 1000);
         public Setting<bool> optimise_throttle = new ("lift.optimise_throttle", false);
+
+        // NEW LIFT SYSTEM (Next/, LiftUI's NEW SYSTEM foldout). Separate from the Optimiser's
+        // limits, which stay as they are (Stage1Optimiser constants).
+        // Max Q: real launchers fly 30-35 kPa; the Optimiser's 15 kPa came from flips that were
+        // really loss-of-control events (see the 2026-11-13 New-mode flight review).
+        public ClampSetting<float> next_max_q_kpa = new ("lift.next.max_q_kpa", 30, 5, 80);
+        // How far the nose may sit off the airflow, as Q x AoA (kPa x deg): AoA limit = this / q,
+        // between 0.5° and 90°. 4 matches the Optimiser's 4/q rule.
+        public ClampSetting<float> next_q_alpha = new ("lift.next.q_alpha", 4, 1, 60);
+        // Pitch kick off vertical at 20-50 m/s; auto = the launch check simulates and picks it.
+        public Setting<bool> next_kick_auto = new ("lift.next.kick_auto", true);
+        public ClampSetting<float> next_kick_deg = new ("lift.next.kick_deg", 3, 0, 20);
+        // surface speed the kick starts at when the kick is set by hand (auto: the launch check picks it)
+        public ClampSetting<float> next_kick_speed = new ("lift.next.kick_speed", 20, 10, 200);
+        // The New system's own throttle cap. Kept apart from max_throttle because the stage-1
+        // Optimiser writes its chosen throttle into max_throttle (Stage1UI Apply): on 2026-11-13
+        // flight 4 that capped the New system at 60% (TWR 1.22 instead of 2.04) while max Q only
+        // reached 23 of 30 kPa. The shield's max-Q throttle-back does the limiting here.
+        public ClampSetting<float> next_max_throttle = new ("lift.next.max_throttle", 1f, 0.1f, 1f);
+        // Stage 1's leftover fuel after cut-off: burned at apoapsis (where raising periapsis costs
+        // least) until stage 1 is dry or periapsis reaches next_s1_pe_km, then stage 1 is dropped
+        // and the upper stage circularises. Before 2026-11-13 the New system cut off and let the
+        // circularisation burn use stage 1 until dry, so where the debris ended up was luck.
+        public Setting<bool> next_s1_ap_burn = new ("lift.next.s1_ap_burn", true);
+        // Highest periapsis stage 1 may be left on. Kept below the atmosphere top (Kerbin 70 km) so
+        // the debris comes down within an orbit or two - see Stage1CapKm.
+        public ClampSetting<float> next_s1_pe_km = new ("lift.next.s1_pe_km", 55, 0, 1000);
+        // The behaviour model (2026-11-14 spec): three weighted behaviours instead of the kick,
+        // the plan grid, throttle holds, pull-downs and the shield's AoA / max-Q limits. Off = the old system.
+        public Setting<bool> next_behaviour_model = new ("lift.next.behaviour_model", true);
+        // Refuse to launch when the launch check says stage 1 can't get there.
+        public Setting<bool> next_refuse_short = new ("lift.next.refuse_short", true);
+
+        /// <summary>Whether Stage1Burn runs for this lift system.</summary>
+        public bool Stage1BurnOn(LiftMode m) => m == LiftMode.New ? next_s1_ap_burn.V : disposal_enabled.V;
+
+        /// <summary>
+        /// Stage 1's periapsis cap (km) for this lift system. The New system's is kept at least
+        /// 2 km inside the atmosphere so stage 1 never stays in orbit.
+        /// </summary>
+        public double Stage1CapKm(LiftMode m, double atmosphereKm)
+        {
+            if (m != LiftMode.New) return disposal_pe_km.V;
+            double cap = next_s1_pe_km.V;
+            if (atmosphereKm > 0) cap = System.Math.Min(cap, atmosphereKm - 2);
+            return cap;
+        }
 
         public Setting<bool> coasting_warp = new ("lift.coasting_warp", true);
         public Setting<bool> adjust = new ("lift.adjust", true);

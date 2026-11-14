@@ -21,3 +21,16 @@ if monodis --typeref Deploy/obj/K2D2.dll | grep -q PanelRenderer; then
   echo "built DLL references PanelRenderer - not loadable on stable" >&2; exit 1
 fi
 echo "Built Deploy/obj/K2D2.dll"
+# --install: copy the DLL and the Patch Manager patches into the game (never Deploy's bundles)
+if [ "${1:-}" = "--install" ]; then
+  DEST="$KSP2/mods/K2D2"
+  # copy then rename: overwriting a DLL the running game has loaded crashes it
+  cp Deploy/obj/K2D2.dll "$DEST/.K2D2.dll.new" && mv -f "$DEST/.K2D2.dll.new" "$DEST/K2D2.dll"
+  mkdir -p "$DEST/patches"
+  cp Tools/install/patches/*.lua "$DEST/patches/"
+  mkdir -p "$DEST/localizations"
+  cp Tools/install/localizations/*.csv "$DEST/localizations/"
+  # Patch Manager only rebuilds its cache when the mod list changes - clear it so patch edits apply
+  rm -rf "$KSP2/pm_cache"
+  echo "Installed to $DEST"
+fi

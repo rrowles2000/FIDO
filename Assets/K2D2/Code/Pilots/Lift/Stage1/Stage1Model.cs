@@ -33,6 +33,17 @@ namespace K2D2.Lift.Stage1
         public bool separatorMarked;
         public PartComponent separatorPart;
         public int separatorStage = -1;
+        // lifting surfaces ahead of / behind the CoM (StabilityCheck; -1 = not looked at). Part of a
+        // design's identity in CraftMemory: removing the 83 t vessel's control surfaces changed its
+        // mass by 0.17 t, so mass and thrust alone called it the same (fragile) design.
+        public int finsAhead = -1, finsBehind = -1;
+
+        public void SetSurfaces(K2D2.Lift.Next.StabilityCheck.Result s)
+        {
+            if (s == null || s.verdict == K2D2.Lift.Next.StabilityCheck.Verdict.Unknown) return;
+            finsAhead = s.finsAhead;
+            finsBehind = s.finsBehind;
+        }
         public List<BurnPhase> phases = new();
         public List<BurnPhase> upperPhases = new(); // stages from the separator onwards, firing order
 
@@ -81,10 +92,12 @@ namespace K2D2.Lift.Stage1
 
         // ---------------------------------------------------------------- build
 
-        public static Stage1Model Build(VesselComponent vessel)
+        // allowNoUpper: a craft whose stage 1 is all there is (the New lift system flies stage one
+        // to orbit) - the Optimiser needs an upper stage, so it keeps the default.
+        public static Stage1Model Build(VesselComponent vessel, bool allowNoUpper = false)
         {
             var model = new Stage1Model();
-            try { model.Fill(vessel); }
+            try { model.Fill(vessel, allowNoUpper); }
             catch (Exception e)
             {
                 model.valid = false;
@@ -94,33 +107,70 @@ namespace K2D2.Lift.Stage1
             return model;
         }
 
-        void Fill(VesselComponent vessel)
+        /// <summary>
+        /// The VAB version (no flying vessel yet): stages from the assembly's Δv data, the marked
+        /// separator passed in as the VAB part (StageGroup knows which one it is). No drag table -
+        /// the VAB has no drag cubes to read - so a simulation of this model leaves drag out.
+        /// </summary>
+        public static Stage1Model FromDeltaV(VesselDeltaVComponent dv, CelestialBodyComponent body, double latitudeDeg,
+                                             double launchAltitude, IDeltaVPart separator, bool allowNoUpper)
+        {
+            var model = new Stage1Model();
+            try
+            {
+                model.body = body;
+                model.latitudeDeg = latitudeDeg;
+                model.launchAltitude = launchAltitude;
+                if (body == null) model.problem = "no planet";
+                else if (model.FillStages(dv, separator, separator?.PartName ?? "", allowNoUpper))
+                    model.valid = true;
+            }
+            catch (Exception e)
+            {
+                model.valid = false;
+                model.problem = "error reading Δv data - see log";
+                L.Log("[Stage1] FromDeltaV threw: " + e);
+            }
+            return model;
+        }
+
+        void Fill(VesselComponent vessel, bool allowNoUpper)
         {
             if (vessel == null) { problem = "no vessel"; return; }
             body = vessel.mainBody;
             latitudeDeg = vessel.Latitude;
             launchAltitude = vessel.AltitudeFromSeaLevel;
 
-            var dv = vessel.VesselDeltaV;
-            if (dv?.StageInfo == null || dv.StageInfo.Count == 0) { problem = "no Δv data yet"; return; }
-
             separatorPart = FindMarkedSeparator(vessel);
-            separatorMarked = separatorPart != null;
+            if (!FillStages(vessel.VesselDeltaV, separatorPart,
+                    separatorPart != null ? separatorPart.PartData?.partName ?? separatorPart.Name : "", allowNoUpper))
+                return;
+
+            BuildDragTable(vessel);
+            valid = true;
+        }
+
+        // Stage-1 and upper burn phases from the game's Δv data; false (with problem set) if unusable.
+        bool FillStages(VesselDeltaVComponent dv, IDeltaVPart separator, string separator_name, bool allowNoUpper)
+        {
+            if (dv?.StageInfo == null || dv.StageInfo.Count == 0) { problem = "no Δv data yet"; return false; }
+
+            separatorMarked = separator != null;
             if (separatorMarked)
             {
-                separatorName = separatorPart.PartData?.partName ?? separatorPart.Name;
+                separatorName = separator_name;
                 foreach (var stage in dv.StageInfo)
                 foreach (var info in stage.Parts)
-                    if (ReferenceEquals(info?.PartRef, separatorPart))
+                    if (ReferenceEquals(info?.PartRef, separator))
                         separatorStage = info.ActivationStage;
-                if (separatorStage < 0) separatorStage = separatorPart.ActivationStage;
+                if (separatorStage < 0) separatorStage = separator.ActivationStage;
             }
 
             var burning = dv.StageInfo
                 .Where(s => s.ThrustVac > 0 && s.StartMass > s.EndMass && s.IspVac > 0)
                 .OrderByDescending(s => s.Stage)
                 .ToList();
-            if (burning.Count == 0) { problem = "no engine stages"; return; }
+            if (burning.Count == 0) { problem = "no engine stages"; return false; }
 
             List<DeltaVStageInfo> upper;
             if (separatorMarked)
@@ -135,8 +185,8 @@ namespace K2D2.Lift.Stage1
                 burning = burning.Take(1).ToList();
                 separatorName = "(none marked - using first engine stage)";
             }
-            if (burning.Count == 0) { problem = $"no engines fire before {separatorName}"; return; }
-            if (upper.Count == 0) { problem = "no upper-stage engines after the separator"; return; }
+            if (burning.Count == 0) { problem = $"no engines fire before {separatorName}"; return false; }
+            if (upper.Count == 0 && !allowNoUpper) { problem = "no upper-stage engines after the separator"; return false; }
 
             BurnPhase ToPhase(DeltaVStageInfo s) => new BurnPhase
             {
@@ -155,9 +205,7 @@ namespace K2D2.Lift.Stage1
                 L.Log($"[Stage1] {(phases.Contains(p) ? "stage-1" : "upper")} phase stage {p.stage}: {p.startMass:n2}t -> {p.endMass:n2}t, " +
                       $"thrust {p.thrustVac:n0} kN vac, Isp {p.ispASL:n0}/{p.ispVac:n0}, Δv {p.deltaVVac:n0}");
             L.Log($"[Stage1] separator '{separatorName}' activation stage {separatorStage}");
-
-            BuildDragTable(vessel);
-            valid = true;
+            return true;
         }
 
         // ---------------------------------------------------------------- drag
@@ -232,8 +280,24 @@ namespace K2D2.Lift.Stage1
         {
             if (!dragValid) return 0;
             double a = aoaDeg * Math.PI / 180;
-            return NoseFactor * Interp(machSamples, areaDrag, mach) * Math.Abs(Math.Cos(a)) +
-                   SideShare * Interp(machSamples, areaDragSide, mach) * Math.Abs(Math.Sin(a));
+            return TransonicFactor(mach) *
+                   (NoseFactor * Interp(machSamples, areaDrag, mach) * Math.Abs(Math.Cos(a)) +
+                    SideShare * Interp(machSamples, areaDragSide, mach) * Math.Abs(Math.Sin(a)));
+        }
+
+        // Extra drag through Mach 1 that the cube tables miss. 2026-11-13 (83 t disposal vessel,
+        // |AoA| < 2°): real/model 1.0-1.09 up to Mach 0.9, then 1.24 at Mach 1.0-1.1 and 1.83 at
+        // Mach 1.2 (that last one probably already the start of the flip). Fitted on the low side
+        // from one flight, so it only peaks at 1.25 and fades out by Mach 1.6; the optimiser's
+        // worst-case run covers the rest. The in-flight "[Stage1] flight" log compares against
+        // this corrected model, so real/model there should read ~1.0 once it's right.
+        public static double TransonicFactor(double mach)
+        {
+            if (mach <= 0.85) return 1;
+            if (mach <= 1.0) return 1 + 0.25 * (mach - 0.85) / 0.15;
+            if (mach <= 1.25) return 1.25;
+            if (mach <= 1.6) return 1.25 - 0.25 * (mach - 1.25) / 0.35;
+            return 1;
         }
     }
 }

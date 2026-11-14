@@ -127,7 +127,11 @@ namespace K2D2.Constellation
             var adj = Adjacency(vessel);
             var depth = Depths(adj, engine);
 
-            foreach (var dec in vessel.SimulationObject.PartOwner.Parts.Where(IsDecoupler))
+            // decouplers ticked "Releases a satellite" in the VAB, when there are any; else every decoupler
+            var decouplers = vessel.SimulationObject.PartOwner.Parts.Where(IsDecoupler).ToList();
+            var marked = decouplers.Where(K2D2.Mission.Module_K2ActionTarget.IsMarkedSatelliteRelease).ToList();
+            if (marked.Count > 0) decouplers = marked;
+            foreach (var dec in decouplers)
             {
                 // each neighbour of the decoupler that is not on the engine side is a payload
                 var engineSide = Reachable(adj, engine, dec);

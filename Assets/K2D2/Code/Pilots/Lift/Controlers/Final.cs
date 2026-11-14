@@ -1,5 +1,6 @@
 using KSP.Sim.impl;
 using KSP.Sim;
+using KSP.Sim.DeltaV;
 using KSP.Sim.Maneuver;
 using KSP2FlightAssistant.MathLibrary;
 using KTools;
@@ -38,12 +39,18 @@ namespace K2D2.Lift
         public SingleExecuteController current_executor = new SingleExecuteController();
         ManeuverNodeData node;
 
+        // seconds before the node to light the engines (half the burn, so it is centred on the
+        // node); 0 = ignite at the node, as before
+        double ignite_lead_s;
+        const double LateTurnMaxDeg = 5;
+
         public FinalCircularize(LiftPilot lift, LiftSettings lift_settings)
         {
             current_vessel = K2D2_Plugin.Instance.current_vessel;
             this.lift = lift;
             this.lift_settings = lift_settings;
             sub_contollers.Add(current_executor);
+            closed_loop = new CircClosedLoop(current_vessel);
         }
 
         public override void Start()
@@ -51,6 +58,7 @@ namespace K2D2.Lift
             base.Start();
             finished = false;
             node = null;
+            closed = false;
 
             if (current_vessel == null)
             {
@@ -87,9 +95,23 @@ namespace K2D2.Lift
             // apoapsis means first passing periapsis - on 2026-10-20 that was 49 km, inside the
             // atmosphere, and the upper stage burned up. If periapsis comes first, circularise
             // shortly instead, at the radius the vessel will be at then.
+            //
+            // Otherwise the node goes ON apoapsis, where prograde is horizontal, and the engines are
+            // lit half the burn early (ignite_lead_s) so the burn is centred on it. Until 2026-11-13
+            // the node itself was moved half a burn early with the apoapsis Δv as pure prograde: there
+            // the path is still climbing (8-14° on the New system's lofted ascents), so the planned
+            // orbit - which the burn then steers to - was eccentric: Ap 125 / Pe 39 km and
+            // Ap 214 / Pe -54 km instead of 90 km circular.
+            double t_burn = BurnTime(current_vessel.VesselComponent, deltaV);
+            const double lead_s = 5; // time to turn onto the node; the vessel is already near prograde
+            ignite_lead_s = 0;
+            if (time_to_apoapsis <= period / 2)
+                // 2 s, not lead_s: after Stage1Burn the vessel is already on the node's direction,
+                // and the late-turn rule in Update covers a slow turn
+                ignite_lead_s = System.Math.Max(0, System.Math.Min(t_burn / 2, time_to_apoapsis - 2));
+
             if (time_to_apoapsis > period / 2)
             {
-                const double lead_s = 30; // time to turn onto the node
                 burn_UT = now + lead_s;
                 Vector3d r_b = orbit.GetRelativePositionAtUTZup(burn_UT);
                 Vector3d v_b = orbit.GetOrbitalVelocityAtUTZup(burn_UT);
@@ -99,9 +121,24 @@ namespace K2D2.Lift
                                $"circularising in {lead_s:n0} s at {(r_b.magnitude - body.radius) / 1000:n1} km instead");
             }
 
+            lift.last_circ_dv = deltaV;
             logger.LogInfo($"[FinalCircularize] now={now:n1} apoapsis={apoapsisRadius:n0} periapsis={periapsisRadius:n0} " +
                 $"body={body.Name} period={period:n1}s time_to_apoapsis={time_to_apoapsis:n1}s | " +
-                $"burn_UT={burn_UT:n1} (T+{burn_UT - now:n1}s) deltaV={deltaV:n2}m/s");
+                $"burn_UT={burn_UT:n1} (T+{burn_UT - now:n1}s) deltaV={deltaV:n2}m/s burn~{t_burn:n0}s, ignition {ignite_lead_s:n0}s before the node");
+
+            // New lift system: closed-loop burn (CircClosedLoop) instead of a node - a node burn
+            // aimed at one instant's plan left weak upper stages at Ap 97 / Pe 85 km
+            if (lift.mode == LiftMode.New)
+            {
+                closed = true;
+                closed_phase = ClosedPhase.Align;
+                ignite_ut = time_to_apoapsis > period / 2 ? now + lead_s : burn_UT - ignite_lead_s;
+                closed_loop.Start(FirstStageThrust(current_vessel.VesselComponent));
+                logger.LogInfo($"[FinalCircularize] closed loop: ~{deltaV:n0} m/s, burn ~{t_burn:n0} s, ignition in {ignite_ut - now:n0} s");
+                status_line = $"Circularizing (closed loop): {deltaV:n1} m/s";
+                return;
+            }
+            closed = false;
 
             maneuver_creator.Update();
             // Clear any existing node before adding ours - AddNodeToVessel only appends, so a
@@ -118,12 +155,110 @@ namespace K2D2.Lift
             });
         }
 
+        // burn time for dv across the stages that will fire, in firing order, from the game's Δv
+        // data (0 if unknown). Stage 1 often still has fuel at the New system's cut-off and is
+        // burned dry during this burn before the upper stage takes over (2026-11-13), so counting
+        // only the first stage got the centring wrong.
+        static double BurnTime(VesselComponent vessel, double dv)
+        {
+            var info = vessel?.VesselDeltaV?.StageInfo;
+            if (info == null) return 0;
+            var stages = new System.Collections.Generic.List<DeltaVStageInfo>();
+            foreach (var s in info)
+                if (s != null && s.ThrustVac > 0 && s.IspVac > 0 && s.StartMass > s.EndMass) stages.Add(s);
+            stages.Sort((a, b) => b.Stage.CompareTo(a.Stage)); // highest stage number fires first
+            double t = 0, left = dv;
+            for (int i = 0; i < stages.Count && left > 0; i++)
+            {
+                var s = stages[i];
+                double m0 = i == 0 ? vessel.totalMass : s.StartMass;
+                if (m0 <= s.EndMass) continue;
+                double ve = s.IspVac * 9.80665;
+                double stage_dv = ve * System.Math.Log(m0 / s.EndMass);
+                double use = System.Math.Min(left, stage_dv);
+                t += Stage1Burn.BurnTime(m0, s.ThrustVac, s.IspVac, use);
+                left -= use;
+            }
+            return t;
+        }
+
+        // ---- closed loop (New lift system)
+        enum ClosedPhase { Align, Warp, Burn }
+        bool closed;
+        ClosedPhase closed_phase;
+        double ignite_ut;
+        CircClosedLoop closed_loop;
+
+        static double FirstStageThrust(VesselComponent vessel)
+        {
+            var info = vessel?.VesselDeltaV?.StageInfo;
+            if (info == null) return 0;
+            DeltaVStageInfo first = null;
+            foreach (var s in info)
+                if (s != null && s.ThrustVac > 0 && (first == null || s.Stage > first.Stage)) first = s;
+            return first?.ThrustVac ?? 0;
+        }
+
+        void UpdateClosed()
+        {
+            double now = GeneralTools.Current_UT;
+            switch (closed_phase)
+            {
+                case ClosedPhase.Align:
+                {
+                    double angle = closed_loop.Point(out _);
+                    status_line = $"Lining up for circularisation: {angle:n1}°, ignition in {ignite_ut - now:n0} s";
+                    if (angle < 5 || now >= ignite_ut - 2)
+                    {
+                        closed_phase = ClosedPhase.Warp;
+                        warp.Start_Ut(ignite_ut - 2);
+                    }
+                    break;
+                }
+                case ClosedPhase.Warp:
+                    closed_loop.Point(out _);
+                    warp.Update();
+                    status_line = $"Circularisation in {ignite_ut - now:n0} s";
+                    if (now >= ignite_ut)
+                    {
+                        TimeWarpTools.SetRateIndex(0, false);
+                        closed_phase = ClosedPhase.Burn;
+                    }
+                    break;
+                case ClosedPhase.Burn:
+                    closed_loop.Update();
+                    status_line = closed_loop.status;
+                    if (closed_loop.finished)
+                    {
+                        finished = true;
+                        lift.EndLiftPilot(true, "Circularized - ascent complete");
+                    }
+                    break;
+            }
+        }
+
         public override void Update()
         {
             if (finished) return;
+            if (closed) { UpdateClosed(); return; }
             if (node == null) return;
 
             base.Update();
+
+            // TurnTo waits for 0.5° and settled rotation; on 2026-11-13 run 2 that took ~48 s and the
+            // burn lit 10 s late, so the upper stage's burn ended up entirely after apoapsis
+            // (Ap 110 / Pe 66 km). At the ignition time, close enough is good enough: SAS keeps
+            // steering onto the node during the burn.
+            if (mode == Mode.Turn && node != null && GeneralTools.Current_UT >= node.Time - ignite_lead_s - 0.5 &&
+                turn.angle < LateTurnMaxDeg)
+            {
+                logger.LogInfo($"[FinalCircularize] ignition time reached while still lining up ({turn.angle:n1}° off) - burning, SAS keeps turning");
+                mode = Mode.Burn;
+                current_executor.setController(burn);
+                burn.StartManeuver(node);
+                burn.UT = node.Time - ignite_lead_s;
+                return;
+            }
 
             if (!current_executor.finished)
                 return;
@@ -136,11 +271,13 @@ namespace K2D2.Lift
                     // Same timewarp-spam fix as DeorbitBurn/Landing's Circularize: no
                     // check_direction flag on StartManeuver.
                     warp.StartManeuver(node);
+                    warp.UT = node.Time - ignite_lead_s; // stop warping before the early ignition
                     break;
                 case Mode.Warp:
                     mode = Mode.Burn;
                     current_executor.setController(burn);
                     burn.StartManeuver(node);
+                    burn.UT = node.Time - ignite_lead_s; // centre the burn on the node
                     break;
                 case Mode.Burn:
                     status_line = "Circularize burn complete";

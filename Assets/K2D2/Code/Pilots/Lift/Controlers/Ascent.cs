@@ -1,5 +1,6 @@
 
 using K2D2.KSPService;
+using KSP.Modules;
 using KSP.Sim;
 using KSP.Sim.impl;
 using KTools;
@@ -13,7 +14,7 @@ namespace K2D2.Lift
     /// <summary>
     /// rotation used for docking
     /// </summary>
-    public class Ascent : ExecuteController
+    public class Ascent : AscentBase
     {
         public ILogger logger = ReduxLib.ReduxLib.GetLogger("K2D2.Ascent");
 
@@ -29,10 +30,7 @@ namespace K2D2.Lift
             this.ascent_path = ascent_path;
         }
 
-        public float current_altitude_km = 0;
-        public float ap_km = 0;
         float last_ap_km = 0;
-        public float delta_ap_per_second;
         float wanted_elevation;
 
         float wanted_throttle = 0;
@@ -104,7 +102,12 @@ namespace K2D2.Lift
             debug_roll_delta_deg = 0;
             debug_roll_error_deg = 0;
             ramped_roll_target_deg = 0;
+
+            LogPlanet();
         }
+
+        // [Planet] one line per run describing the planet of origin (see PlanetLog.cs).
+        void LogPlanet() => PlanetLog.Log(logger, current_vessel.VesselComponent, settings.destination_Ap_km.V);
 
         // Integrates roll around the nose axis since launch by measuring, tick-to-tick, how far the
         // dorsal reference actually rotated between the previous tick's orientation and this tick's
@@ -152,7 +155,7 @@ namespace K2D2.Lift
             prev_roll_rotation_valid = true;
         }
 
-        public void computeValues(bool compute_delta_ap_per_second)
+        public override void computeValues(bool compute_delta_ap_per_second)
         {
             if (current_vessel.VesselComponent == null)
                 return;
@@ -462,18 +465,27 @@ namespace K2D2.Lift
         // Profile climb at the max throttle until apoapsis reaches the target, then hold apoapsis
         // and burn on (Stage1Guidance, the same law the optimiser simulated) until periapsis is up
         // to disposal_pe_km. Then cut the engines and stage until the marked stage-1 separator has
-        // fired. If stage 1 runs dry first (periapsis stops rising), stage it and let the upper
-        // stage finish the job.
+        // fired. If stage 1 runs dry first (down to its burnout mass, or its lit engines give no
+        // thrust), stage it and let the upper stage finish the job.
 
         bool disposal_hold;
         string disposal_phase = "";
         float pe_km;
-        float last_pe_km;
-        float stall_time;
+        float dry_time;
         int separation_attempts;
         double next_separation_ut;
         bool disposal_cutoff;
         KSP.Sim.impl.PartComponent stage1_separator;
+
+        bool launch_checked;        // pre-launch safety check done (first Update on the pad)
+        bool ignition_tried;        // staged once on the pad because no engine was lit
+        double ignition_ut = -1;
+        double first_thrust_ut = -1; // first time the engines gave thrust
+        double next_inner_stage_ut;  // rate limit for staging between stage-1 burn stages
+        bool loss_of_control_logged;
+        float q_throttle = 1f;       // max-Q throttle bucket factor
+        bool bucket_suspended_logged;
+        const double AttitudeErrorNoBucketDeg = 1.5;
 
         void ResetDisposal()
         {
@@ -484,9 +496,15 @@ namespace K2D2.Lift
             disposal_hold = false;
             disposal_cutoff = false;
             disposal_phase = "Profile climb";
-            stall_time = 0;
+            dry_time = 0;
             separation_attempts = 0;
-            last_pe_km = float.NegativeInfinity;
+            launch_checked = false;
+            ignition_tried = false;
+            ignition_ut = -1;
+            first_thrust_ut = -1;
+            next_inner_stage_ut = 0;
+            loss_of_control_logged = false;
+            q_throttle = 1f;
             stage1_separator = K2D2.Lift.Stage1.Stage1Model.FindMarkedSeparator(current_vessel.VesselComponent);
             stage1_model = K2D2.Lift.Stage1.Stage1Model.Build(current_vessel.VesselComponent);
             // No marked separator on board (already dropped, e.g. after a reload, or never marked):
@@ -550,6 +568,49 @@ namespace K2D2.Lift
             if (orbit == null) return;
             double now = GeneralTools.Current_UT;
             double mu = orbit.referenceBody.gravParameter, R = orbit.referenceBody.radius;
+
+            // On the pad: refuse settings the simulator says won't make it (2026-11-13: a plan
+            // changed after Apply flew at 0.72 thrust, which predicts 183% heating), then light
+            // the engines if nobody has.
+            if (!launch_checked)
+            {
+                launch_checked = true;
+                if (!separated && vessel.Landed && stage1_model != null && stage1_model.valid)
+                {
+                    var check = K2D2.Lift.Stage1.Stage1Optimiser.Evaluate(stage1_model,
+                        K2D2.Lift.Stage1.SimParams.FromSettings(settings));
+                    if (!check.Usable)
+                    {
+                        string why = "Launch refused: " + check.problem + ". Re-run the Stage 1 optimiser and Apply, or change the profile.";
+                        logger.LogWarning("[Ascent] " + why);
+                        current_vessel.SetThrottle(0);
+                        LiftPilot.Instance.EndLiftPilot(false, why);
+                        return;
+                    }
+                    logger.LogInfo($"[Ascent] launch check ok: margin {check.nominal.upperMarginDv:n0} m/s (worst case {check.worst.upperMarginDv:n0}), " +
+                                   $"max Q {check.nominal.maxQkPa:n1} kPa ({check.worst.maxQkPa:n1}), heat {check.nominal.maxHeat / K2D2.Lift.Stage1.Stage1Optimiser.HeatLimit * 100:n0}% " +
+                                   $"({check.worst.maxHeat / K2D2.Lift.Stage1.Stage1Optimiser.HeatLimit * 100:n0}%)");
+                }
+            }
+            bool lit = EnginesBurning(out double thrust_kN);
+            if (!separated && !disposal_cutoff && vessel.Landed && !lit && !ignition_tried)
+            {
+                // Engaged before the launch stage was fired: fire it once, at the planned thrust.
+                // (Firing it is all the old code did too, but only by accident, by "separating"
+                // a stage 1 it thought was dry and then staging everything above it.)
+                ignition_tried = true;
+                ignition_ut = now;
+                current_vessel.SetThrottle(settings.max_throttle.V);
+                vessel.ActivateNextStage();
+                logger.LogInfo("[Ascent] disposal: no engine lit on the pad - staged once for ignition");
+            }
+            if (ignition_ut > 0 && !lit && vessel.Landed && now - ignition_ut > 3)
+            {
+                ignition_ut = -1; // warn once
+                disposal_phase = "No engine lit - stage the launch engines by hand";
+                logger.LogWarning("[Ascent] disposal: still no engine lit 3 s after staging - stage the launch engines by hand");
+            }
+            if (lit && thrust_kN > 0.5 && first_thrust_ut < 0) first_thrust_ut = now;
 
             if (disposal_cutoff)
             {
@@ -632,7 +693,11 @@ namespace K2D2.Lift
                 {
                     path_deg = plane_path;
                     if (!disposal_hold)
-                        wanted_elevation = (float)K2D2.Lift.Stage1.Stage1Guidance.FollowPath(wanted_elevation, path_deg);
+                    {
+                        var vehicle_now = current_vessel.VesselVehicle;
+                        double air_speed = vehicle_now != null ? vehicle_now.SurfaceVelocity.vector.magnitude : 0;
+                        wanted_elevation = (float)K2D2.Lift.Stage1.Stage1Guidance.FollowPath(wanted_elevation, path_deg, air_speed);
+                    }
                 }
                 if (disposal_hold)
                     hold_throttle = K2D2.Lift.Stage1.Stage1Guidance.HoldThrottle(wanted_elevation, path_deg, q_kpa,
@@ -680,7 +745,29 @@ namespace K2D2.Lift
                     K2D2.Lift.Stage1.Stage1Guidance.ApThrottle(orbit.Apoapsis, target_ap_r));
 
             applyDirection();
-            wanted_throttle = settings.max_throttle.V * hold_throttle;
+            // max-Q throttle bucket - the same law the optimiser simulated. But never while the nose
+            // is drifting off its command: the engine gimbal is what pulls it back, and on
+            // 2026-11-13 the bucket cut thrust 0.90 -> 0.70 just as R2-1's nose started to fall
+            // away (1.8° -> 6° -> flipped). Then thrust comes back quickly instead.
+            float bucket_before = q_throttle;
+            double attitude_error = System.Math.Abs(nose_elevation - wanted_elevation);
+            if (attitude_error > AttitudeErrorNoBucketDeg && q_kpa > 1)
+            {
+                q_throttle = UnityEngine.Mathf.MoveTowards(q_throttle, 1f, 2f * Time.deltaTime);
+                if (!bucket_suspended_logged && bucket_before < 1f)
+                    logger.LogInfo($"[Ascent] disposal: attitude error {attitude_error:n1}° at q {q_kpa:n1} kPa - max-Q throttle-down suspended, full thrust for control");
+                bucket_suspended_logged = true;
+            }
+            else
+            {
+                bucket_suspended_logged = false;
+                q_throttle = K2D2.Lift.Stage1.Stage1Guidance.MaxQThrottleStep(q_throttle, q_kpa, Time.deltaTime);
+            }
+            if (bucket_before >= 1f && q_throttle < 1f)
+                logger.LogInfo($"[Ascent] disposal: max-Q throttle-down starts at q {q_kpa:n1} kPa, alt {current_altitude_km:n1} km");
+            else if (bucket_before < 1f && q_throttle >= 1f)
+                logger.LogInfo($"[Ascent] disposal: max-Q throttle-down over at q {q_kpa:n1} kPa, alt {current_altitude_km:n1} km");
+            wanted_throttle = settings.max_throttle.V * hold_throttle * q_throttle;
             LogFlightCalibration(vessel, now);
             current_vessel.SetThrottle(wanted_throttle);
 
@@ -692,22 +779,78 @@ namespace K2D2.Lift
                 return;
             }
 
-            // stage 1 dry? the orbit stops growing at full throttle (Pe while holding, Ap before)
-            float watched = disposal_hold ? pe_km : ap_km;
-            if (hold_throttle < 0.5f) stall_time = 0; // coasting on purpose, not burnt out
-            else if (Time.deltaTime > 0 && last_pe_km > float.NegativeInfinity)
+            // Lost control (nose far off the airflow in thick air): say so, once. It is not stage 1
+            // running dry, and staging would only make it worse.
+            if (AirState(vessel, out double lc_path, out double lc_q) && lc_q > 1 &&
+                System.Math.Abs(nose_elevation - lc_path) > 30)
             {
-                float rate = (watched - last_pe_km) / Time.deltaTime;
-                stall_time = rate < 0.005f ? stall_time + Time.deltaTime : 0;
-                if (stall_time > 3)
+                if (!loss_of_control_logged)
+                    logger.LogWarning($"[Ascent] disposal: loss of control at alt {current_altitude_km:n1} km - nose {nose_elevation:n1}°, " +
+                                      $"path {lc_path:n1}°, q {lc_q:n1} kPa, mass {vessel.totalMass:n1} t");
+                loss_of_control_logged = true;
+                disposal_phase = "Loss of control";
+            }
+
+            // Stage 1 dry? Only once its engines have given thrust for 5 s off the pad, and then
+            // either the vessel is down to stage 1's burnout mass, or the lit engines give no thrust
+            // at a commanded throttle. (Was: "Ap/Pe stopped rising for 3 s". On 2026-11-13 that
+            // fired on the pad before ignition - then staged everything up to the separator - and
+            // after each loss of control, with 55-63 t on board against a 26 t burnout mass.)
+            var last_phase = stage1_model != null && stage1_model.valid ? stage1_model.phases[stage1_model.phases.Count - 1] : null;
+            bool burnt_in = first_thrust_ut >= 0 && now - first_thrust_ut > 5 && !vessel.Landed;
+            bool at_burnout_mass = last_phase != null && vessel.totalMass <= last_phase.endMass * 1.03;
+            bool no_thrust = wanted_throttle > 0.05f && thrust_kN < 0.5;
+            if (burnt_in && (at_burnout_mass || no_thrust)) dry_time += Time.deltaTime;
+            else dry_time = 0;
+            if (dry_time > 2)
+            {
+                dry_time = 0;
+                if (!at_burnout_mass && stage1_model != null && stage1_model.phases.Count > 1)
                 {
-                    stall_time = 0;
-                    logger.LogInfo($"[Ascent] disposal: stage 1 dry at Ap {ap_km:n1} Pe {pe_km:n1} km, alt {current_altitude_km:n1} km");
+                    // flamed out between stage 1's own burn stages (e.g. boosters, then core): stage once
+                    if (now >= next_inner_stage_ut)
+                    {
+                        next_inner_stage_ut = now + 3;
+                        logger.LogInfo($"[Ascent] disposal: no thrust at {vessel.totalMass:n1} t (stage-1 burnout {last_phase?.endMass:n1} t) - staging to the next stage-1 burn");
+                        vessel.ActivateNextStage();
+                    }
+                }
+                else
+                {
+                    logger.LogInfo($"[Ascent] disposal: stage 1 dry at Ap {ap_km:n1} Pe {pe_km:n1} km, alt {current_altitude_km:n1} km, " +
+                                   $"mass {vessel.totalMass:n1} t (burnout {last_phase?.endMass:n1} t), thrust {thrust_kN:n0} kN");
                     StartSeparation(now, "Stage 1 dry - separating");
                     return;
                 }
             }
-            last_pe_km = watched;
+        }
+
+        // Whether any engine on board is lit, and the thrust (kN) the lit ones give right now.
+        bool EnginesBurning(out double thrust_kN)
+        {
+            thrust_kN = 0;
+            bool lit = false;
+            // same engine list and fields BurndV.Compute_Thrust reads
+            var engines = current_vessel.VesselComponent?.VesselDeltaV?.EngineInfo;
+            if (engines == null) return false;
+            foreach (var info in engines)
+            {
+                var engine = info?.Engine;
+                if (engine == null || !engine.EngineIgnited) continue;
+                lit = true;
+                thrust_kN += engine.FinalThrustValue;
+            }
+            // Also ask the parts themselves (as Stage1Burn does): "nothing lit" makes the pad
+            // ignition stage once, so it must not come from a stale or partial engine list.
+            if (!lit)
+            {
+                var parts = current_vessel.VesselComponent?.SimulationObject?.PartOwner?.Parts;
+                if (parts != null)
+                    foreach (var p in parts)
+                        if (p.TryGetModule<PartComponentModule_Engine>(out var module) && module.EngineIgnited)
+                            return true;
+            }
+            return lit;
         }
 
         bool separated;
@@ -774,6 +917,12 @@ namespace K2D2.Lift
 
         void StartSeparation(double now, string phase)
         {
+            // never stage stage 1 away on the ground
+            if (current_vessel.VesselComponent != null && current_vessel.VesselComponent.Landed)
+            {
+                logger.LogWarning($"[Ascent] disposal: refused to separate on the ground ({phase})");
+                return;
+            }
             disposal_phase = phase;
             disposal_cutoff = true;
             separation_attempts = 0;

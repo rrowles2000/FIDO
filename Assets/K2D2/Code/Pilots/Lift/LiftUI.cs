@@ -57,6 +57,7 @@ namespace K2D2.Lift
             BuildPolarLaunch(panel.Q<Foldout>("profile"), settings);
             stage1_ui = new K2D2.Lift.Stage1.Stage1UI(settings);
             stage1_ui.Build(panel);
+            BuildModeSelector(panel, settings);
 
             var graph = panel.Q<VisualElement>("graph");
             pilot.ascent_path.InitUI(graph);
@@ -89,6 +90,54 @@ namespace K2D2.Lift
         }
 
         K2D2.Lift.Stage1.Stage1UI stage1_ui;
+        K2D2.Lift.Next.NextUI next_ui;
+
+        // LIFT SYSTEM: picks which ascent system flies (LiftSettings.LiftMode). Built in code and
+        // placed under the tab title, above the Stage 1 optimiser controls (which only the
+        // Optimiser system uses).
+        void BuildModeSelector(VisualElement panel, LiftSettings settings)
+        {
+            var box = new VisualElement();
+            box.style.marginBottom = 6;
+
+            var row = new VisualElement();
+            row.AddToClassList("k2-slider-label-row");
+            row.Add(new Label("Lift System") { style = { fontSize = 13 } });
+            box.Add(row);
+
+            var selector = new InlineEnum();
+            selector.Bind(settings.mode, "Classic;Optimiser;New");
+            box.Add(selector);
+
+            var hint = new Label();
+            hint.AddToClassList("k2-slider-value-label");
+            hint.style.whiteSpace = WhiteSpace.Normal;
+            box.Add(hint);
+
+            var title = panel.Q<Label>("Title");
+            var parent = title?.parent;
+            if (parent != null) parent.Insert(parent.IndexOf(title) + 1, box);
+            else panel.Insert(0, box);
+
+            // the New system's own settings sit right under the selector
+            next_ui = new K2D2.Lift.Next.NextUI(settings);
+            next_ui.Build(box.parent ?? panel, (box.parent ?? panel).IndexOf(box) + 1);
+
+            settings.mode.listen(m =>
+            {
+                hint.text = m switch
+                {
+                    LiftMode.Classic => "Original K2-D2 ascent: profile climb, coast, adjust, circularise.",
+                    LiftMode.Optimiser => "Our ascent: adds stage-1 disposal and the optimiser below.",
+                    _ => "New lift system (Phase 0.1): 10 Hz layered loop and safety shield, pitch kick + gravity turn, launch check on the pad. No network yet.",
+                };
+                stage1_ui.SetVisible(m == LiftMode.Optimiser);
+                next_ui.SetVisible(m == LiftMode.New);
+            });
+
+            // the run keeps the system it started with - lock the selector while flying
+            pilot.is_running_event += running => selector.SetEnabled(!running);
+        }
 
         Label polar_hint;
 
@@ -203,7 +252,7 @@ namespace K2D2.Lift
             status_bar.Reset();
             if (pilot.isRunning)
             {
-                status_bar.Warning($"Status : {pilot.status}");
+                status_bar.Warning($"Status : {pilot.status} ({pilot.mode})");
 
                 if (pilot.current_subpilot != null)
                     pilot.current_subpilot.updateUI(panel, status_bar);

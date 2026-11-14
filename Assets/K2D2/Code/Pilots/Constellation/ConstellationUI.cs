@@ -87,6 +87,12 @@ namespace K2D2.Constellation
             reserve.Bind(pilot.settings.reserve_pc);
             deploy.Add(reserve);
 
+            var accel = new K2Slider { Label = "Max burn acceleration (m/s²)", printValue = true };
+            accel.InitValues(pilot.settings.max_accel.V, 1, 30);
+            accel.Bind(pilot.settings.max_accel);
+            accel.tooltip = "Throttle cap for the carrier's burns - lower stops the lightened carrier wobbling";
+            deploy.Add(accel);
+
             deploy.Add(Toggle("Auto dish switch on", pilot.settings.auto_dish));
             deploy.Add(Toggle("Recover fuel", pilot.settings.move_fuel));
 
@@ -180,7 +186,7 @@ namespace K2D2.Constellation
             return t;
         }
 
-        static VisualElement StatusGroup()
+        internal static VisualElement StatusGroup()
         {
             var group = new VisualElement { name = "status_progress_group" };
             group.style.marginTop = 10;

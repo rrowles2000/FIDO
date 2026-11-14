@@ -74,6 +74,7 @@ namespace K2D2
         static bool loaded = false;
 
         K2D2Window main_window = null;
+        K2D2.Mission.MissionVabWindow mission_vab_window = null;
 
         public override void OnPreInitialized()
         {
@@ -135,8 +136,12 @@ namespace K2D2
             // create staging 
             new StagingPilot();
 
+            // the Mission tab drives the pilots below
+            pilots_manager.AddPilot(new K2D2.Mission.MissionPilot());
             pilots_manager.AddPilot(new NodeExPilot());
             pilots_manager.AddPilot(new LiftPilot());
+            // the Training tab drives Lift: pad -> orbit -> revert, X times
+            pilots_manager.AddPilot(new K2D2.Training.TrainingPilot());
             pilots_manager.AddPilot(new LandingPilot());
             pilots_manager.AddPilot(new DockingPilot());
             pilots_manager.AddPilot(new AttitudePilot());
@@ -187,6 +192,15 @@ namespace K2D2
                 ToolbarFlightButtonID,
                 AssetsLoader.LoadIcon("icon.png"),
                 isOpen => main_window.IsWindowOpen = isOpen
+            );
+
+            // VAB: the mission plan editor
+            mission_vab_window = K2D2.Mission.MissionVabWindow.Create();
+            Appbar.RegisterOABAppButton(
+                "K2-D2 Mission",
+                K2D2.Mission.MissionVabWindow.ButtonId,
+                AssetsLoader.LoadIcon("icon.png"),
+                isOpen => mission_vab_window.IsOpen = isOpen
             );
 
             // Register OAB AppBar Button
@@ -259,6 +273,10 @@ namespace K2D2
             Debug.developerConsoleVisible = false;
             // Update Models (even on non valid scenes)
             current_vessel.Update();
+
+            // VAB stage-1 launch check on the marked separator (does nothing outside the VAB)
+            K2D2.Lift.Next.VabAdvisor.Update();
+            K2D2.Lift.Next.DebrisTracker.Update();
 
             /* TODO: Other mods interfacing
             if (K2D2OtherModsInterface.instance == null)

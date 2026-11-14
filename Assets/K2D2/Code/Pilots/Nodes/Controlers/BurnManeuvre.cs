@@ -57,6 +57,10 @@ namespace K2D2.Node
 
 
         public float needed_throttle = 0;
+
+        // m/s²; >0 caps the throttle so a light vessel isn't shoved at full thrust (Constellation
+        // sets it - the carrier gets lighter with every satellite released and starts to wobble)
+        public double max_accel = 0;
         public float remaining_full_burn_time = 0;
 
         ManeuverNodeData maneuver;
@@ -73,6 +77,7 @@ namespace K2D2.Node
             finished = false;
             mode = Mode.Waiting;
             remaining_dv = 0;
+            nan_since = -1;
             last_remaining_dv = -1;
 
             if (current_vessel == null) return;
@@ -89,10 +94,39 @@ namespace K2D2.Node
         }
 
         Vector3d initial_dir = Vector3d.zero;
+
+        // The game's maneuver solver can hand back NaN (2026-11-14: a stage-1 apoapsis burn sat at
+        // throttle 0 for 76 s, Math.Sign throwing every frame, because the burn's reference
+        // direction was taken once at Start while it was NaN). Now the reference is re-taken from
+        // the first finite value, NaN frames are skipped, and after NaNTimeoutS the burn ends so
+        // the pipeline can carry on (Stage1Burn separates, FinalCircularize re-plans).
+        const double NaNTimeoutS = 3;
+        double nan_since = -1;
+        static bool Finite(Vector3d v) =>
+            !(double.IsNaN(v.x) || double.IsNaN(v.y) || double.IsNaN(v.z) ||
+              double.IsInfinity(v.x) || double.IsInfinity(v.y) || double.IsInfinity(v.z));
         int sign = 0;
         float angle;
 
         public double UT = 0;
+
+        // [Burn] log: ignition, every LogPeriodS while burning, and the end - nothing about the
+        // burn reached the log before 2026-11-13, when two circularisations went badly wrong
+        const double LogPeriodS = 2.0;
+        double next_log_ut;
+        double ignition_ut;
+
+        void LogBurn(string what)
+        {
+            var v = current_vessel?.VesselComponent;
+            var o = v?.Orbit;
+            if (o == null) return;
+            double R = o.referenceBody.radius;
+            double now = GeneralTools.Game.UniverseModel.UniverseTime;
+            logger.LogInfo($"[Burn] {what}: {(now - UT >= 0 ? "+" : "")}{now - UT:n1}s from planned ignition, remaining {remaining_dv:n1} m/s, " +
+                           $"angle off start {angle:n1}°, throttle {last_throttle:n2}, Ap {(o.Apoapsis - R) / 1000:n1} Pe {(o.Periapsis - R) / 1000:n1} km, " +
+                           $"inc {o.inclination:n2}°, mass {v.totalMass:n2} t");
+        }
 
         public override void Update()
         {
@@ -107,12 +141,23 @@ namespace K2D2.Node
                 if (start_dt > 0)
                 {
                     status_line = $"Ignition in {StrTool.DurationToString(start_dt)}";
+                    // the game's burn timer assumes full thrust; say how long the capped burn really takes
+                    if (max_accel > 0)
+                    {
+                        burn_dV.LateUpdate();
+                        if (burn_dV.full_dv > max_accel)
+                            status_line += $" - burn {StrTool.DurationToString(maneuver.BurnDuration * burn_dV.full_dv / max_accel)}" +
+                                           $" at {max_accel:0.#} m/s² (game timer assumes full thrust)";
+                    }
                     set_throttle(0);
                     return;
                 }
                 else
                 {
                     mode = Mode.Burning;
+                    ignition_ut = GeneralTools.Game.UniverseModel.UniverseTime;
+                    next_log_ut = 0;
+                    LogBurn($"ignition (node Δv {maneuver.BurnRequiredDV:n1} m/s)");
 
                     if (BurnManeuverSettings.rotate_during_burn.V)
                         SASTool.setAutoPilot(AutopilotMode.Maneuver);
@@ -145,6 +190,28 @@ namespace K2D2.Node
 
                 var current_vel = current_vessel.VesselComponent.Orbit.GetOrbitalVelocityAtUTZup(ut);
                 var delta_speed_vector = velocity_after_maneuver.vector - current_vel;
+                double now_ut = GeneralTools.Game.UniverseModel.UniverseTime;
+                if (!Finite(delta_speed_vector))
+                {
+                    if (nan_since < 0)
+                    {
+                        nan_since = now_ut;
+                        logger.LogWarning("[Burn] maneuver solver returned NaN - holding until it recovers");
+                    }
+                    if (now_ut - nan_since > NaNTimeoutS)
+                    {
+                        logger.LogWarning($"[Burn] maneuver solver NaN for {NaNTimeoutS:n0} s - ending this burn so the flight can carry on");
+                        Finished();
+                    }
+                    else if (now_ut - nan_since > 0.5) set_throttle(0);
+                    return;
+                }
+                if (nan_since >= 0)
+                {
+                    logger.LogInfo($"[Burn] maneuver solver recovered after {now_ut - nan_since:n1} s");
+                    nan_since = -1;
+                }
+                if (!Finite(initial_dir) || initial_dir.sqrMagnitude < 1e-6) initial_dir = delta_speed_vector;
                 sign = Math.Sign(Vector3d.Dot(initial_dir, delta_speed_vector));
 
                 angle = (float)Vector3d.Angle(initial_dir, delta_speed_vector);
@@ -170,6 +237,11 @@ namespace K2D2.Node
                     compute_throttle();
                     set_throttle(needed_throttle);
                     status_line = $"{remaining_dv:n2} m/s remaining";
+                    if (now_ut >= next_log_ut)
+                    {
+                        next_log_ut = now_ut + LogPeriodS;
+                        LogBurn("burning");
+                    }
                 }
             }
         }
@@ -179,6 +251,7 @@ namespace K2D2.Node
             status_line = $"Burn complete - {remaining_dv:n2} m/s error";
             set_throttle(0);
             finished = true;
+            LogBurn($"complete after {GeneralTools.Game.UniverseModel.UniverseTime - ignition_ut:n1}s");
         }
 
         float last_throttle = -1;
@@ -202,10 +275,18 @@ namespace K2D2.Node
             if (remaining_full_burn_time >= 1)
             {
                 needed_throttle = 1;
+                CapThrottle();
                 return;
             }
 
             needed_throttle = remaining_full_burn_time * BurnManeuverSettings.burn_adjust.V;
+            CapThrottle();
+        }
+
+        void CapThrottle()
+        {
+            if (max_accel > 0 && burn_dV.full_dv > max_accel)
+                needed_throttle = Mathf.Min(needed_throttle, (float)(max_accel / burn_dV.full_dv));
         }
 
         public override void updateUI(VisualElement root_el, FullStatus st)

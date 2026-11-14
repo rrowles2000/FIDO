@@ -70,6 +70,11 @@ namespace K2D2.UI
 
         TabbedPage tab_page;
 
+        public static K2D2Window Instance { get; private set; }
+
+        /// <summary>Opens a tab by code (the Mission tab's "Manual control").</summary>
+        public void SelectTab(string code) => tab_page?.Select(code);
+
         List<K2Page> all_panels = new();
 
         // Which tab the info button should return to when clicked again from About - see the
@@ -88,6 +93,7 @@ namespace K2D2.UI
         private void OnEnable()
         {
             L.Log("K2D2Window.OnEnable running");
+            Instance = this;
 
             _panel = GetComponent<UIDocument>();
             if (_panel == null)
@@ -180,6 +186,15 @@ namespace K2D2.UI
                 var sats = K2D2.Constellation.ConstellationUI.CreateTabPage();
                 sats.style.display = DisplayStyle.None;
                 content.Insert(index < 0 ? content.childCount : index, sats);
+                // the Mission tab (also code-built) goes first
+                var mission = K2D2.Mission.MissionUI.CreateTabPage();
+                mission.style.display = DisplayStyle.None;
+                content.Insert(0, mission);
+                // the Training tab (code-built) goes just before About
+                var training = K2D2.Training.TrainingUI.CreateTabPage();
+                training.style.display = DisplayStyle.None;
+                int about_index = about != null ? content.IndexOf(about) : -1;
+                content.Insert(about_index < 0 ? content.childCount : about_index, training);
 
                 // The UXML-built pages carry their own stylesheets (K2Toggle, K2Slider,
                 // ToggleButton...) on their TemplateContainers; give the code-built page the same set.
@@ -191,12 +206,20 @@ namespace K2D2.UI
                             var sheet = el.styleSheets[i];
                             if (!sats.styleSheets.Contains(sheet))
                                 sats.styleSheets.Add(sheet);
+                            if (!mission.styleSheets.Contains(sheet))
+                                mission.styleSheets.Add(sheet);
+                            if (!training.styleSheets.Contains(sheet))
+                                training.styleSheets.Add(sheet);
                         }
                 }
             }
             tab_page.Init(all_panels);
             // save the current_tab to settings
-            tab_page.Bind("main_page", "node");
+            tab_page.Bind("main_page", K2D2.Mission.MissionUI.Code);
+
+            // the K2 mascot avatar next to each status line is dropped
+            _rootElement.Query<K2Avatar>().ForEach(a => a.style.display = DisplayStyle.None);
+            PinStatusGroups();
 
             // Renamed from "title-bar" when the window chrome switched from a hand-built header to
             // UitkForKsp2.Controls.AppShell (which owns its own header - icon/title/close - and has no
@@ -274,10 +297,65 @@ namespace K2D2.UI
             L.Log("K2D2Window.OnUiReload finished wiring successfully");
         }
 
+        // Each tab's status block (status line, console, progress bar) is moved out of the scroll
+        // view into a host pinned above it, so it stays in sight wherever the tab is scrolled to.
+        // Only the open tab's block is shown. FullStatus keeps its element references, so the
+        // pages keep driving their status as before.
+        readonly Dictionary<string, VisualElement> pinned_status = new();
+        string pinned_tab;
+
+        void PinStatusGroups()
+        {
+            var scroll = _rootElement.Q<ScrollView>("tab-scroll-view");
+            if (scroll?.parent == null)
+            {
+                L.Log("K2D2Window.PinStatusGroups: no tab-scroll-view - status stays inside the tabs");
+                return;
+            }
+            var host = new VisualElement { name = "pinned-status" };
+            host.style.flexShrink = 0;
+            host.style.maxHeight = Length.Percent(40);
+            host.style.overflow = Overflow.Hidden;
+            host.style.paddingLeft = 6;
+            host.style.paddingRight = 6;
+            host.style.borderBottomWidth = 1;
+            host.style.borderBottomColor = new Color(1, 1, 1, 0.15f);
+            scroll.parent.Insert(scroll.parent.IndexOf(scroll), host);
+
+            foreach (var page in all_panels)
+            {
+                var tab = page.panel;
+                var line = tab?.Q<StatusLine>("status_pilot");
+                if (line == null) continue;
+                var group = tab.Q("status_progress_group") ?? line.parent;
+                // the group's USS lives on the page's TemplateContainer - carry it over
+                for (var el = group.parent; el != null && el != _rootElement; el = el.parent)
+                    for (int i = 0; i < el.styleSheets.count; i++)
+                        if (!host.styleSheets.Contains(el.styleSheets[i]))
+                            host.styleSheets.Add(el.styleSheets[i]);
+                group.style.marginTop = 4;
+                group.style.marginBottom = 4;
+                var holder = new VisualElement();
+                holder.style.display = DisplayStyle.None;
+                holder.Add(group);
+                host.Add(holder);
+                pinned_status[page.code] = holder;
+            }
+        }
+
+        void SyncPinnedStatus()
+        {
+            if (tab_page == null || tab_page.CurrentTabCode == pinned_tab) return;
+            pinned_tab = tab_page.CurrentTabCode;
+            foreach (var kv in pinned_status)
+                kv.Value.style.display = kv.Key == pinned_tab ? DisplayStyle.Flex : DisplayStyle.None;
+        }
+
         void Update()
         {
             // tab_page isn't wired up until OnUiReload has run - guard rather than NRE on an early frame.
             tab_page?.Update();
+            SyncPinnedStatus();
 
             // PointerUpEvent/PointerCaptureOutEvent can fail to reach the resize handle in this
             // game's UI Toolkit embedding, which would leave ResizeManipulator with no event to end

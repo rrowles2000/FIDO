@@ -443,13 +443,21 @@ namespace K2D2.KSPService
         {
             yield return new WaitForFixedUpdate();
 
-            MapCore mapCore = null;
-            Game.Map.TryGetMapCore(out mapCore);
-            if (mapCore)
+            // Outside map view the map's maneuver manager isn't set up and GetNodeDataForVessels
+            // throws (an NRE on every circularise node, 2026-11-13). The gizmo only matters in map
+            // view, which refreshes it itself when opened, so a failure here is safe to ignore.
+            try
             {
-                mapCore.map3D.ManeuverManager.GetNodeDataForVessels();
-                mapCore.map3D.ManeuverManager.UpdatePositionForGizmo(nodeData.NodeID);
+                MapCore mapCore = null;
+                Game.Map.TryGetMapCore(out mapCore);
+                var manager = mapCore ? mapCore.map3D?.ManeuverManager : null;
+                if (manager != null)
+                {
+                    manager.GetNodeDataForVessels();
+                    manager.UpdatePositionForGizmo(nodeData.NodeID);
+                }
             }
+            catch (System.NullReferenceException) { }
         }
 
 

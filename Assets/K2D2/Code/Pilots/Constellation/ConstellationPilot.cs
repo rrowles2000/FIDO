@@ -26,6 +26,8 @@ namespace K2D2.Constellation
         // new key so the old, switched-off "activate_dish" value doesn't carry over
         public Setting<bool> auto_dish = new("constellation.auto_dish", true);
         public Setting<bool> move_fuel = new("constellation.move_fuel", true);
+        // burn acceleration cap (m/s²) - full thrust on the lightened carrier makes it wobble
+        public ClampSetting<float> max_accel = new("constellation.max_accel", 5, 1, 30);
 
         // how close (km) both apsides must already be to skip the altitude change
         public ClampSetting<float> altitude_tolerance_km = new("constellation.altitude_tolerance_km", 1, 0.1f, 50);
@@ -53,6 +55,9 @@ namespace K2D2.Constellation
         public PartComponent carrier_command;
         public List<PartComponent> carrier_parts = new();
         VesselComponent scanned_vessel;
+        int scanned_parts = -1;
+
+        static int PartCount(VesselComponent vessel) => vessel?.SimulationObject?.PartOwner?.Parts?.Count() ?? -1;
 
         ConstellationUI ui;
 
@@ -209,7 +214,7 @@ namespace K2D2.Constellation
 
         // ---------------------------------------------------------------- polar
 
-        public bool PolarEstimate(out double dv, out double inclination, out string problem)
+        public bool PolarEstimate(out double dv, out double inclination, out string problem, double target_inc = 90)
         {
             dv = 0;
             inclination = 0;
@@ -229,7 +234,7 @@ namespace K2D2.Constellation
             if (double.IsNaN(sma) || sma <= 0) { problem = "Not in a closed orbit"; return false; }
 
             // speed at the node of a near-circular orbit
-            dv = OrbitMath.PlaneChangeDv(OrbitMath.CircularSpeed(mu, sma), 90.0 - inclination);
+            dv = OrbitMath.PlaneChangeDv(OrbitMath.CircularSpeed(mu, sma), target_inc - inclination);
             return true;
         }
 
@@ -239,6 +244,7 @@ namespace K2D2.Constellation
         {
             var vessel = current_vessel?.VesselComponent;
             scanned_vessel = vessel;
+            scanned_parts = PartCount(vessel);
             satellites = ConstellationVessel.FindSatellites(vessel);
             carrier_command = vessel == null ? null : ConstellationVessel.FindCarrierCommand(vessel, out carrier_parts);
             ui?.RebuildOrder();
@@ -256,7 +262,7 @@ namespace K2D2.Constellation
 
         // ================================================================ run
 
-        public enum Job { None, Deploy, Polar }
+        public enum Job { None, Deploy, Polar, Altitude }
         public Job job = Job.None;
 
         readonly Queue<Step> steps = new();
@@ -357,22 +363,29 @@ namespace K2D2.Constellation
             NextStep();
         }
 
-        public void StartPolar()
+        // inclination the plane change aims for: 90 from the Sats tab's polar button, anything from a mission step
+        public double plane_target = 90;
+
+        public void StartPolar() => StartPlaneChange(90);
+
+        public void StartPlaneChange(double target_inc)
         {
             if (isRunning) return;
+            plane_target = target_inc;
+            Rescan();
             if (!PolarEstimate(out _, out double inc, out string problem))
             {
                 Finish(false, problem);
                 return;
             }
-            if (Math.Abs(90 - inc) < 0.1)
+            if (Math.Abs(plane_target - inc) < 0.1)
             {
-                Finish(true, "Already polar");
+                Finish(true, $"Already at {plane_target:0.#}°");
                 return;
             }
             K2D2_Plugin.ResetControllers();
             steps.Clear();
-            var polar = new NodeStep(this, "Plane change to 90°", PlanPolar);
+            var polar = new NodeStep(this, $"Plane change to {plane_target:0.#}°", PlanPolar);
             polar.verify = () => VerifyPolar(polar.NodeUT);
             steps.Enqueue(polar);
             end_status = "";
@@ -381,11 +394,33 @@ namespace K2D2.Constellation
             NextStep();
         }
 
+        /// <summary>Hohmann transfer to a circular orbit at the target altitude (settings.target_altitude_km).</summary>
+        public void StartAltitude()
+        {
+            if (isRunning) return;
+            Rescan();
+            if (current_vessel?.VesselComponent?.Orbit == null)
+            {
+                Finish(false, "No vessel");
+                return;
+            }
+            K2D2_Plugin.ResetControllers();
+            steps.Clear();
+            steps.Enqueue(new NodeStep(this, "Raise/lower to target altitude", PlanAltitudeBurn1));
+            steps.Enqueue(new NodeStep(this, "Circularize at target altitude", PlanAltitudeBurn2));
+            end_status = "";
+            job = Job.Altitude;
+            base.isRunning = true;
+            NextStep();
+        }
+
         void NextStep()
         {
             if (steps.Count == 0)
             {
-                Finish(true, job == Job.Polar ? "Polar orbit reached" : $"Constellation deployed ({released_count} released)");
+                Finish(true, job == Job.Polar ? $"Inclination {plane_target:0.#}° reached"
+                    : job == Job.Altitude ? $"Circular at {TargetAltitude / 1000:n0} km"
+                    : $"Constellation deployed ({released_count} released)");
                 return;
             }
             current_step = steps.Dequeue();
@@ -500,7 +535,9 @@ namespace K2D2.Constellation
 
         public override void Update()
         {
-            if (current_vessel?.VesselComponent != null && !isRunning && paused == null && scanned_vessel != current_vessel.VesselComponent)
+            // rescan on a vessel switch, and when staging changes the parts (e.g. stage 1 dropped)
+            var vc = current_vessel?.VesselComponent;
+            if (vc != null && !isRunning && paused == null && (scanned_vessel != vc || scanned_parts != PartCount(vc)))
                 Rescan();
 
             if (current_step == null) return;
@@ -720,7 +757,7 @@ namespace K2D2.Constellation
             KeplerPropagator.Propagate(r, v, mu, dt, out var rb, out var vb);
 
             double inc = OrbitMath.InclinationDeg(r, v);
-            double delta = (90.0 - inc) * Math.PI / 180.0;
+            double delta = (plane_target - inc) * Math.PI / 180.0;
             double speed = vb.magnitude;
             // +normal at the ascending node raises inclination; flipped at the descending node
             double sign = (ascending ? 1 : -1) * polar_normal_sign;
@@ -750,8 +787,8 @@ namespace K2D2.Constellation
                 return null;
             }
             double after = patch.inclination;
-            logger.LogInfo($"[Constellation] polar node gives inclination {after:n2}°");
-            if (Math.Abs(after - 90) < 1.0) return true;
+            logger.LogInfo($"[Constellation] plane change node gives inclination {after:n2}° (target {plane_target:0.#}°)");
+            if (Math.Abs(after - plane_target) < 1.0) return true;
             polar_normal_sign = -polar_normal_sign;
             return false;
         }
@@ -787,7 +824,7 @@ namespace K2D2.Constellation
             }
         }
 
-        class AlignStep : Step
+        internal class AlignStep : Step
         {
             readonly ConstellationPilot pilot;
             readonly AutopilotMode mode;
@@ -825,7 +862,7 @@ namespace K2D2.Constellation
 
                 if (steady_since > 0 && Time.time - steady_since > 2) return true;
                 if (Time.time - start > 120)
-                    throw new Exception("Couldn't line up radial-out within 2 minutes");
+                    throw new Exception($"Couldn't line up {mode} within 2 minutes");
                 return false;
             }
         }
@@ -1001,7 +1038,18 @@ namespace K2D2.Constellation
                 pilot.maneuver_creator.RemoveAllNodesThenCreate(p.UT, p.prograde, n => node = n, p.normal);
             }
 
-            double BurnStartUT => node.Time - node.BurnDuration / 2;
+            // the game's BurnDuration is at full thrust; the acceleration cap stretches it
+            double BurnStartUT
+            {
+                get
+                {
+                    accel_probe.LateUpdate();
+                    double cap = pilot.settings.max_accel.V;
+                    double stretch = accel_probe.full_dv > cap ? accel_probe.full_dv / cap : 1;
+                    return node.Time - node.BurnDuration * stretch / 2;
+                }
+            }
+            readonly BurndV accel_probe = new();
             public double NodeUT => node?.Time ?? 0;
 
             public override bool Update()
@@ -1052,6 +1100,7 @@ namespace K2D2.Constellation
                         status = turn.status_line;
                         if (!turn.finished) return false;
                         burn.StartManeuver(node);
+                        burn.max_accel = pilot.settings.max_accel.V;
                         phase = Phase.Burn;
                         return false;
 

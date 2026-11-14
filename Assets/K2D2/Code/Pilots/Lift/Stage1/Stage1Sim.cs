@@ -86,10 +86,14 @@ namespace K2D2.Lift.Stage1
         // above the path at high q it is aerodynamically unstable.
         public const double HighQKPa = 10;
 
+        // 2026-11-13 (R2-1, six unfaired satellites on top): flipped at q 13.5 kPa, Mach 0.55, from
+        // -1.8° AoA - the old 2° floor between 2 and 10 kPa let it get there. The limit now keeps
+        // falling as 4/q down to 0.5° (1° at 4 kPa, 0.5° from 8 kPa), so in thick air the ascent
+        // is a near zero-AoA gravity turn.
         public static double MaxAoADeg(double qKPa, double mach = 0)
         {
             if (qKPa > HighQKPa) return 0.5;
-            return qKPa <= 0.04 ? 90 : Math.Max(2, Math.Min(90, 4 / qKPa));
+            return qKPa <= 0.04 ? 90 : Math.Max(0.5, Math.Min(90, 4 / qKPa));
         }
 
         public static double LimitAoA(double elevDeg, double airPathDeg, double qKPa, double mach = 0)
@@ -162,8 +166,45 @@ namespace K2D2.Lift.Stage1
         // lean at liftoff moved the predicted upper-stage burn by ~65 m/s); following the path
         // steers them out, so the flight matches the simulation. pathDeg is signed in the launch
         // plane (above 90 = leaning back).
-        public static double FollowPath(double profileDeg, double pathDeg) =>
-            Math.Min(92, profileDeg + (profileDeg - pathDeg));
+        // 2026-11-13: a full gain from 10 m/s, capped at 92°, made an 83 t vessel at 1.15 TWR
+        // oscillate from liftoff (cmd 88..91°, path noise fed straight back) until it fell over
+        // at 3 km / 129 m/s. Below ~60 m/s the path angle is mostly noise, so the gain now ramps
+        // in from 60 to 120 m/s, is halved while the profile is still near vertical, the
+        // correction is limited to ±8°, and the command never leans back past vertical.
+        public const double FollowStartSpeed = 60, FollowFullSpeed = 120;
+
+        // Max-Q throttle bucket: ease the thrust off while dynamic pressure nears the limit, back
+        // up as it falls. Without it a fixed thrust limit had to be both high enough for 1.2 TWR
+        // at liftoff and low enough to stay under the max-Q limit once the vessel got light -
+        // impossible for the 2026-11-13 disposal vessel (0.744 needed for TWR, ~0.65 for max Q).
+        // Full thrust up to 85% of the limit, down to 40% of it at the limit, changing at most
+        // 50% of full per second. The simulator and the flight use this same function.
+        public const double BucketStartFraction = 0.85;
+        public const float MinBucketFactor = 0.4f, BucketRatePerSec = 0.5f;
+
+        public static float MaxQThrottleTarget(double qKPa) => MaxQThrottleTarget(qKPa, Stage1Optimiser.MaxQLimitKPa);
+
+        // Same law against any limit (the New lift system's is a Lift setting).
+        public static float MaxQThrottleTarget(double qKPa, double limitKPa)
+        {
+            double limit = limitKPa, start = BucketStartFraction * limit;
+            if (qKPa <= start) return 1f;
+            return (float)Math.Max(MinBucketFactor, 1 - (qKPa - start) / (limit - start) * (1 - MinBucketFactor));
+        }
+
+        public static float MaxQThrottleStep(float current, double qKPa, double dt) =>
+            MaxQThrottleStep(current, qKPa, dt, Stage1Optimiser.MaxQLimitKPa);
+
+        public static float MaxQThrottleStep(float current, double qKPa, double dt, double limitKPa) =>
+            Mathf.MoveTowards(current, MaxQThrottleTarget(qKPa, limitKPa), (float)(BucketRatePerSec * dt));
+
+        public static double FollowPath(double profileDeg, double pathDeg, double airSpeed)
+        {
+            double gain = Math.Max(0, Math.Min(1, (airSpeed - FollowStartSpeed) / (FollowFullSpeed - FollowStartSpeed)));
+            if (profileDeg > 80) gain *= 0.5;
+            double correction = Math.Max(-8, Math.Min(8, gain * (profileDeg - pathDeg)));
+            return Math.Min(90, profileDeg + correction);
+        }
 
         // Same shape as LiftAscentPath.compute_elevation, with explicit parameters.
         public static double ProfileElevationDeg(double altKm, double startKm, double midKm, double endKm)
@@ -185,6 +226,24 @@ namespace K2D2.Lift.Stage1
 
         public double MidKm => Mathf.Lerp(startKm, (float)targetApKm, midRatio);
         public double EndKm => Mathf.Lerp(startKm, (float)targetApKm, endRatio);
+
+        // The profile the Lift pilot will actually fly with these settings.
+        public static SimParams FromSettings(LiftSettings s) => new SimParams
+        {
+            startKm = s.start_altitude_km.V,
+            midRatio = s.mid_rotate_ratio.V,
+            endRatio = s.end_rotate_ratio.V,
+            throttle = s.max_throttle.V,
+            targetApKm = s.destination_Ap_km.V,
+            disposalPeKm = s.disposal_pe_km.V,
+            endAscentErrorKm = s.end_ascent_error,
+            headingDeg = s.heading.V,
+        };
+
+        public bool SameProfile(SimParams o) =>
+            startKm == o.startKm && Math.Abs(midRatio - o.midRatio) < 0.001f &&
+            Math.Abs(endRatio - o.endRatio) < 0.001f && Math.Abs(throttle - o.throttle) < 0.001f &&
+            Math.Abs(targetApKm - o.targetApKm) < 0.01;
     }
 
     public struct SimResult
@@ -198,6 +257,7 @@ namespace K2D2.Lift.Stage1
         public double leftoverDv, maxQkPa, holdStartAltKm;
         public double maxHeat;      // max of sqrt(density)*v^3 - convective heating proxy
         public double maxHeatAltKm; // where it peaked
+        public double minBucket;    // lowest max-Q throttle factor used (1 = never throttled back)
         // upper stage, from separation to a circular orbit at the target apoapsis
         public bool upperFeasible;
         public double upperClimbDv; // spent finishing the climb if stage 1 left Ap short
@@ -215,11 +275,29 @@ namespace K2D2.Lift.Stage1
     {
         const double G0 = 9.80665;
         const double Dt = 0.2;
+        public const double StepS = Dt; // simulation step, for controllers that need their dt
 
         readonly Stage1Model model;
         readonly double mu, R, depth, omegaCosLat, launchR;
         readonly double atmoStep = 100;
         readonly double[] pKPa, rho, sound;
+
+        // Multiplies the modelled drag - the optimiser's worst-case run uses more than 1.
+        public double dragScale = 1;
+        // thrust at the same propellant flow (= an Isp factor) - one of the factors the New lift
+        // system's calibration (Next/Calibrator.cs) fits from flights
+        public double thrustScale = 1;
+
+        // ---- read-only views for the model export (Next/ModelExport.cs)
+        public double AtmoStepM => atmoStep;
+        public double AtmoDepthM => depth;
+        public double[] AtmoPressureKPa => pKPa;
+        public double[] AtmoDensity => rho;
+        public double[] AtmoSoundSpeed => sound;
+
+        // Step() holds the command within the Optimiser's AoA limit. A caller that applies its
+        // own limit (the New system's shield, whose Q·AoA limit is a setting) turns this off.
+        public bool limitAoAInStep = true;
 
         public Stage1Sim(Stage1Model model)
         {
@@ -289,27 +367,31 @@ namespace K2D2.Lift.Stage1
             double vAirT = s.vt - omegaCosLat * s.r * sinH, vAirR = s.vr;
             double vAir = Math.Sqrt(vAirT * vAirT + vAirR * vAirR);
             double qPaNow = 0.5 * d * vAir * vAir;
-            if (vAir > 5)
+            if (vAir > 5 && limitAoAInStep)
                 elevDeg = Stage1Guidance.LimitAoA(elevDeg, Math.Atan2(vAirR, vAirT) * 180 / Math.PI, qPaNow / 1000,
                                                   a > 0 ? vAir / a : 0);
             double dragAcc = 0;
+            if (d > 0 && vAir > 0.1)
+            {
+                // q and heating depend only on the air and the speed, so they're tracked with or
+                // without a drag table (the VAB has none; before 2026-11-13 it reported 0 kPa / 0%)
+                res.maxQkPa = Math.Max(res.maxQkPa, qPaNow / 1000);
+                double heat = Math.Sqrt(d) * vAir * vAir * vAir;
+                if (heat > res.maxHeat) { res.maxHeat = heat; res.maxHeatAltKm = alt / 1000; }
+            }
             if (d > 0 && vAir > 0.1 && model.dragValid)
             {
                 double mach = a > 0 ? vAir / a : 0;
-                double qPa = qPaNow;
                 double aoa = vAir > 5 ? elevDeg - Math.Atan2(vAirR, vAirT) * 180 / Math.PI : 0;
                 double pre = PhysicsSettings.DragCurvePseudoReynolds.Evaluate((float)(d * vAir));
                 double dragKN = model.AreaDragAt(mach, aoa) * PhysicsSettings.DragCubeMultiplier * pre *
-                                PhysicsSettings.DragMultiplier * qPa * 0.001;
+                                PhysicsSettings.DragMultiplier * qPaNow * 0.001 * dragScale;
                 dragAcc = dragKN / s.m;
-                res.maxQkPa = Math.Max(res.maxQkPa, qPa / 1000);
-                double heat = Math.Sqrt(d) * vAir * vAir * vAir;
-                if (heat > res.maxHeat) { res.maxHeat = heat; res.maxHeatAltKm = alt / 1000; }
             }
 
             double atm = Math.Min(1.0, p / 101.325);
             double isp = ph.ispVac + (ph.ispASL - ph.ispVac) * atm;
-            double thrust = ph.thrustVac * throttle * isp / ph.ispVac;
+            double thrust = ph.thrustVac * throttle * isp / ph.ispVac * thrustScale;
             double mdot = ph.thrustVac * throttle / (ph.ispVac * G0);
             double er = elevDeg * Math.PI / 180;
 
@@ -342,17 +424,94 @@ namespace K2D2.Lift.Stage1
         {
             if (!trace || (int)(s.t / Dt) % (int)(10 / Dt) != 0) return;
             double vAirT = s.vt - omegaCosLat * s.r * sinHTrace, vAirR = s.vr;
-            Stage1Guidance.ApPe(mu, s.r, s.vr, s.vt, out double ap, out double pe);
+            Stage1Guidance.ApPe(mu, s.r, s.vr, Vt3(s.r, s.vt), out double ap, out double pe);
             L.Log($"[Stage1] sim T+{s.t:n0} {stage} alt {(s.r - R) / 1000:n1} km, v {Math.Sqrt(vAirT * vAirT + vAirR * vAirR):n0} m/s, " +
                   $"path {Math.Atan2(vAirR, vAirT) * 180 / Math.PI:n1}, cmd {traceElev:n1}, aoa {traceElev - Math.Atan2(vAirR, vAirT) * 180 / Math.PI:n1}, thr {thr:n2}, Ap {(ap - R) / 1000:n1} Pe {(pe - R) / 1000:n1}, mass {s.m:n1} t");
         }
         double sinHTrace;
+
+        // ---- the velocity across the launch plane (2026-11-14). The sim is 2-D, in the launch
+        // plane, but the ground spins under it: launching on heading H leaves omega*R*cos(lat)*cos(H)
+        // of orbital velocity ACROSS the plane (175 m/s on Kerbin for a northward launch). The air
+        // moves with the ground, so drag doesn't see it, but the orbit does: ignoring it made every
+        // northward flight reach its target apoapsis later than real - low-TWR vessels cut off
+        // 6-10° steeper, 7 s earlier and 170 m/s slower than predicted. Its angular momentum is
+        // conserved, so the cross speed at radius r is crossH / r; apoapsis/periapsis use the full
+        // horizontal speed.
+        double crossH;
+        void SetCross(double headingDeg) => crossH = omegaCosLat * launchR * Math.Cos(headingDeg * Math.PI / 180) * launchR;
+        double Vt3(double r, double vt) { double c = crossH / r; return Math.Sqrt(vt * vt + c * c); }
+
+        // ---------------------------------------------------------------- external controller
+
+        /// <summary>What a controller sees each simulated step (plain numbers, SI, kPa).</summary>
+        public struct Sample
+        {
+            public double t, altitude, r, vr, vt, apR, peR;
+            public double airSpeed, pathDeg, qKPa, mach, heat;
+            public double mass, thrustKN; // thrust at the last commanded throttle
+            public int phase;
+        }
+
+        /// <summary>Returns false to stop; otherwise the pitch (deg above the horizon) and throttle to fly.</summary>
+        public delegate bool Controller(in Sample s, out double elevDeg, out float throttle);
+
+        /// <summary>
+        /// Flies stage 1 (the model's stage-1 phases) under an external controller, so the New lift
+        /// system can simulate its own arbiter, policy and shield rather than a copy of them. Stops
+        /// when the controller says so, stage 1 runs dry, the vessel crashes or maxT passes.
+        /// res.leftoverDv is what stage 1 has left at the stop; last is the final state.
+        /// </summary>
+        public SimResult RunControlled(Controller controller, double headingDeg, double maxT, out Sample last)
+        {
+            var res = new SimResult();
+            double sinH = Math.Sin(headingDeg * Math.PI / 180);
+            SetCross(headingDeg);
+            var s = new State { r = launchR, vt = omegaCosLat * launchR * sinH, m = model.phases[0].startMass };
+            double dvUsed = 0;
+            float thr = 0;
+            last = default;
+            while (s.t < maxT)
+            {
+                var ph = model.phases[s.phase];
+                Atmo(s.r - R, out double p, out double d, out double a);
+                double vAirT = s.vt - omegaCosLat * s.r * sinH, vAirR = s.vr;
+                double vAir = Math.Sqrt(vAirT * vAirT + vAirR * vAirR);
+                Stage1Guidance.ApPe(mu, s.r, s.vr, Vt3(s.r, s.vt), out double apR, out double peR);
+                double isp = ph.ispVac + (ph.ispASL - ph.ispVac) * Math.Min(1.0, p / 101.325);
+                last = new Sample
+                {
+                    t = s.t, altitude = s.r - R, r = s.r, vr = s.vr, vt = s.vt, apR = apR, peR = peR,
+                    airSpeed = vAir, pathDeg = vAir > 0.1 ? Math.Atan2(vAirR, vAirT) * 180 / Math.PI : 90,
+                    qKPa = 0.0005 * d * vAir * vAir, mach = a > 0 ? vAir / a : 0, heat = Math.Sqrt(d) * vAir * vAir * vAir,
+                    mass = s.m, thrustKN = ph.thrustVac * thr * isp / ph.ispVac * thrustScale, phase = s.phase,
+                };
+                if (!controller(last, out double elev, out thr)) break;
+                if (!Step(ref s, model.phases, thr, elev, sinH, ref res, ref dvUsed)) { res.outOfFuel = true; break; }
+                if (s.r < R - 50) { res.crashed = true; break; }
+            }
+            Stage1Guidance.ApPe(mu, s.r, s.vr, Vt3(s.r, s.vt), out double apEnd, out double peEnd);
+            res.tBurnout = s.t;
+            res.altKm = (s.r - R) / 1000;
+            res.apKm = double.IsInfinity(apEnd) ? 1e9 : (apEnd - R) / 1000;
+            res.peKm = (peEnd - R) / 1000;
+            res.fpaDeg = Math.Atan2(s.vr, s.vt) * 180 / Math.PI;
+            if (!res.outOfFuel && !res.crashed)
+            {
+                var ph = model.phases[s.phase];
+                double left = ph.ispVac * G0 * Math.Log(Math.Max(s.m, ph.endMass) / ph.endMass);
+                for (int i = s.phase + 1; i < model.phases.Count; i++) left += model.phases[i].deltaVVac;
+                res.leftoverDv = left;
+            }
+            return res;
+        }
 
         public SimResult Run(SimParams sp)
         {
             var res = new SimResult();
             double sinH = Math.Sin(sp.headingDeg * Math.PI / 180);
             sinHTrace = sinH;
+            SetCross(sp.headingDeg);
             double targetApR = R + sp.targetApKm * 1000;
             double holdApR = R + (sp.targetApKm - sp.endAscentErrorKm) * 1000;
             double capPeR = R + sp.disposalPeKm * 1000;
@@ -362,6 +521,8 @@ namespace K2D2.Lift.Stage1
             var s = new State { r = launchR, vt = omegaCosLat * launchR * sinH, m = model.phases[0].startMass };
             bool hold = false, apBurn = false;
             var smoother = new Stage1Guidance.PitchSmoother();
+            float qThrottle = 1f;
+            res.minBucket = 1;
             double atmoTopR = R + depth;
             double apR = s.r, peR = 0, dvStage1 = 0;
 
@@ -373,10 +534,10 @@ namespace K2D2.Lift.Stage1
                 float thr = throttle;
                 if (hold)
                 {
-                    elev = Stage1Guidance.HoldElevationDeg(mu, s.r, s.vr, s.vt, targetApR);
+                    elev = Stage1Guidance.HoldElevationDeg(mu, s.r, s.vr, Vt3(s.r, s.vt), targetApR);
                     AirPath(s, sinH, out double path, out double qKPa);
                     var ph = model.phases[s.phase];
-                    if (!apBurn && Stage1Guidance.CoastToApoapsis(mu, s.r, s.vr, s.vt, apR, peR, atmoTopR, capPeR,
+                    if (!apBurn && Stage1Guidance.CoastToApoapsis(mu, s.r, s.vr, Vt3(s.r, s.vt), apR, peR, atmoTopR, capPeR,
                             s.m, model.phases[model.phases.Count - 1].endMass, ph.thrustVac * throttle, ph.ispVac))
                     {
                         thr = 0; // coast nose-prograde (as Coasting flies it), least drag
@@ -393,17 +554,21 @@ namespace K2D2.Lift.Stage1
                     elev = Stage1Guidance.ProfileElevationDeg((s.r - R) / 1000, sp.startKm, midKm, endKm);
                     AirPath(s, sinH, out double pathF, out _);
                     double vAirT = s.vt - omegaCosLat * s.r * sinH;
-                    if (vAirT * vAirT + s.vr * s.vr > 100) elev = Stage1Guidance.FollowPath(elev, pathF);
+                    double vAirF = Math.Sqrt(vAirT * vAirT + s.vr * s.vr);
+                    if (vAirF > 10) elev = Stage1Guidance.FollowPath(elev, pathF, vAirF);
                 }
                 {
                     AirPath(s, sinH, out double path2, out double q2, out double mach2);
                     if (q2 > 0 || s.t > 1) elev = Stage1Guidance.LimitAoA(elev, path2, q2, mach2);
                     elev = smoother.Next(elev, Dt, q2);
+                    qThrottle = Stage1Guidance.MaxQThrottleStep(qThrottle, q2, Dt);
+                    if (thr > 0) res.minBucket = Math.Min(res.minBucket, qThrottle);
+                    thr *= qThrottle;
                 }
                 traceElev = elev;
                 Trace(s, "S1", thr);
                 if (!Step(ref s, model.phases, thr, elev, sinH, ref res, ref dvStage1)) { res.outOfFuel = true; }
-                Stage1Guidance.ApPe(mu, s.r, s.vr, s.vt, out apR, out peR);
+                Stage1Guidance.ApPe(mu, s.r, s.vr, Vt3(s.r, s.vt), out apR, out peR);
                 if (res.outOfFuel) break;
                 if (!hold && apR >= holdApR)
                 {
@@ -439,7 +604,7 @@ namespace K2D2.Lift.Stage1
                 double elev = Stage1Guidance.ProfileElevationDeg((u.r - R) / 1000, sp.startKm, midKm, endKm);
                 Trace(u, "upper", 1f);
                 if (!Step(ref u, model.upperPhases, 1f, elev, sinH, ref res, ref climbDv)) { upperOk = false; break; }
-                Stage1Guidance.ApPe(mu, u.r, u.vr, u.vt, out apR, out peR);
+                Stage1Guidance.ApPe(mu, u.r, u.vr, Vt3(u.r, u.vt), out apR, out peR);
                 if (u.r < R - 50) { res.crashed = true; upperOk = false; break; }
                 if (u.t > 4000) { upperOk = false; break; }
             }
@@ -475,6 +640,7 @@ namespace K2D2.Lift.Stage1
             public bool found;
             public SimParams best;
             public SimResult result;
+            public SimResult worst;     // the same plan with less thrust and more drag
             public int runs;
             public string note;
         }
@@ -484,49 +650,109 @@ namespace K2D2.Lift.Stage1
         // thermal model yet.
         public const double HeatLimit = 5e8;
 
+        // Dynamic pressure an ascent should stay under. 2026-11-13: the 83 t disposal vessel
+        // flipped at 15-19 kPa through Mach 1 on two flights; 2026-10-20's sat vessel at ~25 kPa.
+        // Before this, max Q only cost 0.01 m/s per kPa, so the optimiser ignored it.
+        public const double MaxQLimitKPa = 15;
+
+        // Every candidate is also flown with less thrust and more drag than modelled, and scored
+        // on the worse of the two. The optimiser always sits on the edge of its limits (shallowest
+        // turn allowed), so a plan that is only just fine nominally failed in flight: 0.80 -> 0.70
+        // throttle took the 2026-11-13 plan from 16% to 183% heating.
+        public const float WorstThrottleFactor = 0.9f;
+        public const double WorstDragFactor = 1.3;
+
+        // Liftoff thrust-to-weight the thrust limit may not go below.
+        public const double MinLiftoffTwr = 1.2;
+
+        // Lowest thrust limit that still gives MinLiftoffTwr at liftoff.
+        public static float MinThrottle(Stage1Model model)
+        {
+            var ph = model.phases[0];
+            double g = model.body.gravParameter / (model.body.radius * model.body.radius);
+            double fullAsl = ph.thrustVac * ph.ispASL / ph.ispVac;
+            return Mathf.Clamp((float)(MinLiftoffTwr * ph.startMass * g / fullAsl), 0.05f, 1f);
+        }
+
+        // Why a simulated ascent isn't safe to fly, or null if it is.
+        public static string Problem(SimResult r)
+        {
+            if (r.crashed) return "crashes - profile too flat";
+            if (!r.upperFeasible) return $"upper stage short by {-r.upperMarginDv:n0} m/s";
+            if (r.maxHeat > HeatLimit) return $"overheats ({r.maxHeat / HeatLimit * 100:n0}% of the limit at {r.maxHeatAltKm:n0} km)";
+            if (r.maxQkPa > MaxQLimitKPa) return $"max Q {r.maxQkPa:n1} kPa is over the {MaxQLimitKPa:n0} kPa limit";
+            return null;
+        }
+
+        public struct Check
+        {
+            public SimResult nominal, worst;
+            public string problem;      // null when both runs are fine
+            public bool Usable => problem == null;
+        }
+
+        static SimParams Worst(SimParams p)
+        {
+            p.throttle *= WorstThrottleFactor;
+            return p;
+        }
+
+        // Nominal and worst-case run of one set of Lift settings, plus whether it's safe to fly.
+        public static Check Evaluate(Stage1Model model, SimParams p)
+        {
+            var c = new Check
+            {
+                nominal = new Stage1Sim(model).Run(p),
+                worst = new Stage1Sim(model) { dragScale = WorstDragFactor }.Run(Worst(p)),
+            };
+            string n = Problem(c.nominal), w = Problem(c.worst);
+            if (n != null) c.problem = n;
+            else if (w != null) c.problem = $"with {(1 - WorstThrottleFactor) * 100:n0}% less thrust and {(WorstDragFactor - 1) * 100:n0}% more drag it {w}";
+            if (c.problem == null && p.throttle < MinThrottle(model) - 0.005f)
+                c.problem = $"the {p.throttle * 100:n0}% thrust limit gives under {MinLiftoffTwr:n1} TWR at liftoff (needs {MinThrottle(model) * 100:n0}%)";
+            return c;
+        }
+
         // Lower is better: the upper stage's Δv from separation to a circular orbit at the target.
         static double Score(SimResult r)
         {
             if (r.crashed) return -1e7;
-            // over the heating limit: heavily penalised, scaled so a smaller overshoot still wins
+            // over the heating or max-Q limit: heavily penalised, scaled so a smaller overshoot still wins
             double heatPenalty = r.maxHeat > HeatLimit ? 1e5 + (r.maxHeat / HeatLimit) * 1e4 : 0;
-            if (!r.upperFeasible) return -1e6 + Math.Min(r.upperMarginDv, 0) - heatPenalty;
-            return -r.UpperDv - 0.01 * r.maxQkPa - heatPenalty;
+            double qPenalty = r.maxQkPa > MaxQLimitKPa ? 1e5 + (r.maxQkPa / MaxQLimitKPa) * 1e4 : 0;
+            if (!r.upperFeasible) return -1e6 + Math.Min(r.upperMarginDv, 0) - heatPenalty - qPenalty;
+            return -r.UpperDv - heatPenalty - qPenalty;
         }
 
         public static Outcome Run(Stage1Model model, SimParams baseParams, bool optimiseThrottle)
         {
             var sim = new Stage1Sim(model);
+            var worstSim = new Stage1Sim(model) { dragScale = WorstDragFactor };
             var outcome = new Outcome();
             SimParams best = baseParams;
-            SimResult bestRes = default;
+            SimResult bestRes = default, bestWorst = default;
             double bestScore = double.NegativeInfinity;
 
-            // Don't let the turn go flat deep in the atmosphere: 45° no lower than 12% of the
-            // atmosphere's height, horizontal no lower than 60% of it.
+            // Don't let the turn go flat deep in the atmosphere: 45° no lower than 22% of the
+            // atmosphere's height, horizontal no lower than 80% of it. (Was 12% / 60%: the
+            // optimiser always picked the floor - 45° at ~9 km on Kerbin - and that flew far too
+            // shallow, through Mach 1 at 8-10 km, on 2026-11-13.)
             double atmoKm = model.body.hasAtmosphere ? model.body.atmosphereDepth / 1000 : 0;
-            double minMidKm = 0.12 * atmoKm, minEndKm = 0.6 * atmoKm;
+            double minMidKm = 0.22 * atmoKm, minEndKm = 0.8 * atmoKm;
 
             double Try(SimParams p)
             {
                 if (p.endRatio <= p.midRatio + 0.02f) return double.NegativeInfinity;
-                if (p.MidKm < minMidKm || p.EndKm < minEndKm) return double.NegativeInfinity;
+                if (p.MidKm < minMidKm || p.EndKm < Math.Min(minEndKm, p.targetApKm)) return double.NegativeInfinity;
                 var r = sim.Run(p);
+                var w = worstSim.Run(Worst(p));
                 outcome.runs++;
-                r.score = Score(r);
-                if (r.score > bestScore) { bestScore = r.score; best = p; bestRes = r; }
+                r.score = Math.Min(Score(r), Score(w));
+                if (r.score > bestScore) { bestScore = r.score; best = p; bestRes = r; bestWorst = w; }
                 return r.score;
             }
 
-            float minThrottle = 1f;
-            if (optimiseThrottle)
-            {
-                // keep at least 1.2 TWR at liftoff
-                var ph = model.phases[0];
-                double g = model.body.gravParameter / (model.body.radius * model.body.radius);
-                double fullAsl = ph.thrustVac * ph.ispASL / ph.ispVac;
-                minThrottle = Mathf.Clamp((float)(1.2 * ph.startMass * g / fullAsl), 0.2f, 1f);
-            }
+            float minThrottle = optimiseThrottle ? MinThrottle(model) : 1f;
 
             int[] starts = { 1, 2, 3, 5, 8, 12 };
             float[] mids = { 0.05f, 0.1f, 0.15f, 0.2f, 0.25f, 0.3f, 0.4f, 0.5f };
@@ -549,9 +775,13 @@ namespace K2D2.Lift.Stage1
             if (optimiseThrottle && minThrottle < 0.999f)
             {
                 var fullThrust = best;
-                foreach (var thr in new[] { 0.9f, 0.8f, 0.7f, 0.6f })
+                // the minimum itself is a candidate too (it was skipped: 0.744 needed, 0.7 tried)
+                var thrusts = new List<float>();
+                foreach (var t in new[] { 0.9f, 0.8f, 0.7f, 0.6f })
+                    if (t > minThrottle + 0.01f) thrusts.Add(t);
+                thrusts.Add(Mathf.Ceil(minThrottle * 100) / 100);
+                foreach (var thr in thrusts)
                 {
-                    if (thr < minThrottle) break;
                     var p = fullThrust;
                     p.throttle = thr;
                     Refine(p, 2);
@@ -583,15 +813,17 @@ namespace K2D2.Lift.Stage1
                 }
             }
 
-            outcome.found = true;
+            outcome.found = !double.IsNegativeInfinity(bestScore);
             outcome.best = best;
             outcome.result = bestRes;
+            outcome.worst = bestWorst;
             if (optimiseThrottle && minThrottle >= 0.999f)
-                outcome.note = "thrust can't be lowered (liftoff TWR would drop below 1.2)";
-            L.Log($"[Stage1] optimiser: {outcome.runs} runs, start {best.startKm} km, mid {best.midRatio:n2}, " +
-                  $"end {best.endRatio:n2}, thr {best.throttle:n2} -> upper Δv {bestRes.UpperDv:n0} (climb {bestRes.upperClimbDv:n0} + circ {bestRes.circDv:n0}), " +
+                outcome.note = $"thrust can't be lowered (liftoff TWR would drop below {MinLiftoffTwr:n1})";
+            L.Log($"[Stage1] optimiser: {outcome.runs} runs, start {best.startKm} km, mid {best.midRatio:n2} ({best.MidKm:n0} km), " +
+                  $"end {best.endRatio:n2} ({best.EndKm:n0} km), thr {best.throttle:n2} -> upper Δv {bestRes.UpperDv:n0} (climb {bestRes.upperClimbDv:n0} + circ {bestRes.circDv:n0}), " +
                   $"margin {bestRes.upperMarginDv:n0}, S1 cut-off Ap {bestRes.apKm:n1} Pe {bestRes.peKm:n1} km cap {bestRes.capHit}, maxQ {bestRes.maxQkPa:n1} kPa, " +
-                  $"heat {bestRes.maxHeat / HeatLimit * 100:n0}% at {bestRes.maxHeatAltKm:n1} km");
+                  $"heat {bestRes.maxHeat / HeatLimit * 100:n0}% at {bestRes.maxHeatAltKm:n1} km; " +
+                  $"worst case margin {bestWorst.upperMarginDv:n0}, maxQ {bestWorst.maxQkPa:n1} kPa, heat {bestWorst.maxHeat / HeatLimit * 100:n0}%");
             return outcome;
         }
     }
