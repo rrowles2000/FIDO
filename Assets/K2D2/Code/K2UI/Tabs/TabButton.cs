@@ -105,6 +105,7 @@ namespace K2UI.Tabs
             {
                 _lighted = value;
                 el_light.EnableInClassList(lightedUss, _lighted);
+                el_light.style.display = _lighted ? DisplayStyle.Flex : DisplayStyle.None;
             }
         }
 
@@ -123,22 +124,21 @@ namespace K2UI.Tabs
 
         static readonly UnityEngine.Color IconIdle = new UnityEngine.Color(0.72f, 0.76f, 0.8f);
         static readonly UnityEngine.Color IconActive = new UnityEngine.Color(1f, 1f, 1f);
-        static readonly UnityEngine.Color EdgeActive = new UnityEngine.Color(0.37f, 0.66f, 1f);
+        static readonly UnityEngine.Color FillActive = new UnityEngine.Color(0.2f, 0.42f, 0.8f, 0.85f);
+        static readonly UnityEngine.Color EdgeActive = new UnityEngine.Color(0.45f, 0.7f, 1f);
+        static readonly UnityEngine.Color EdgeIdle = new UnityEngine.Color(1f, 1f, 1f, 0.12f);
+        static readonly UnityEngine.Color FillIdle = new UnityEngine.Color(0f, 0f, 0f, 0f);
 
-        // 2026-11-15: square icon buttons, the name as a hover tooltip (was a text label)
+        // 2026-11-15: square icon buttons, the name as a hover tooltip (was a text label). Every
+        // state colour is set inline, so the bundle's pill-tab styles (active background, the
+        // stretched "pilot running" light bar) no longer leave a second tab looking selected.
         void ApplyLook()
         {
             icon.SetColor(_active ? IconActive : IconIdle);
-            if (_active)
-            {
-                style.borderBottomColor = EdgeActive;
-                style.borderBottomWidth = 3;
-            }
-            else
-            {
-                style.borderBottomColor = StyleKeyword.Null;
-                style.borderBottomWidth = StyleKeyword.Null;
-            }
+            var edge = _active ? EdgeActive : EdgeIdle;
+            style.backgroundColor = _active ? FillActive : FillIdle;
+            style.borderTopColor = style.borderBottomColor = style.borderLeftColor = style.borderRightColor = edge;
+            style.borderTopWidth = style.borderBottomWidth = style.borderLeftWidth = style.borderRightWidth = 1;
         }
         
         // This constructor allows users to set the contents of the label.
@@ -147,6 +147,18 @@ namespace K2UI.Tabs
             el_light = new VisualElement();
             el_light.name = "tab_light";
             el_light.AddToClassList(usslightName);
+            // a small green dot in the corner while the tab's pilot runs (the bundle's light is a
+            // bar sized for the old wide tabs)
+            el_light.style.position = Position.Absolute;
+            el_light.style.top = 2;
+            el_light.style.right = 2;
+            el_light.style.left = StyleKeyword.Auto;
+            el_light.style.width = el_light.style.height = 6;
+            el_light.style.borderTopLeftRadius = el_light.style.borderTopRightRadius = el_light.style.borderBottomLeftRadius = el_light.style.borderBottomRightRadius = 3;
+            el_light.style.backgroundImage = StyleKeyword.None;
+            el_light.style.backgroundColor = new UnityEngine.Color(0.3f, 0.85f, 0.35f);
+            el_light.style.display = DisplayStyle.None;
+            el_light.pickingMode = PickingMode.Ignore;
             Add(el_light);
 
             el_label = new Label();

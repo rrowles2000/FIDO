@@ -75,8 +75,10 @@ namespace K2D2.Lift.Next
             public double calDrag = 1, calThrust = 1, calAoA = 0, calAoAGain = 1, calTrim = 0;
             public double calS1Loss;          // stage-1 apoapsis burn loss, m/s (LearnS1BurnLoss)
             public int s1LossFlights;
-            public double calS1Left;          // stage-1 Δv left at cut-off, real minus sim, m/s (LearnS1Left)
+            public double calS1Left;          // stage-1 Δv left at cut-off, real minus sim, m/s: Kalman mean (LearnS1Left)
+            public double calS1LeftVar;       // ... and its variance, (m/s)² (0 in records from before 2026-11-15 pm)
             public int s1LeftFlights;
+            public BehaviourWeights? flownWeights; // the weights the last pad launch actually flew (trust-region anchor)
             public int calFlights;
             public bool fragile;              // has drifted outside the kick
             public double capKPa;             // superseded 2026-11-14 (a throttle q cap cut steering authority); ignored
@@ -187,8 +189,8 @@ namespace K2D2.Lift.Next
         {
             var r = Get(model);
             if (r != null && r.calFlights > 0)
-                return new LaunchCheck.Calibration { dragScale = r.calDrag, thrustScale = r.calThrust, aoaBiasDeg = r.calAoA, aoaGain = r.calAoAGain > 0 ? r.calAoAGain : 1, trimDeg = r.calTrim, s1BurnLossDv = r.calS1Loss, s1LeftBiasDv = r.calS1Left,
-                                                     source = $"this design, {r.calFlights} flight(s)" };
+                return WithS1Left(new LaunchCheck.Calibration { dragScale = r.calDrag, thrustScale = r.calThrust, aoaBiasDeg = r.calAoA, aoaGain = r.calAoAGain > 0 ? r.calAoAGain : 1, trimDeg = r.calTrim, s1BurnLossDv = r.calS1Loss,
+                                                     source = $"this design, {r.calFlights} flight(s)" }, r);
             double w = 0, d = 0, t = 0, k = 0, gsum = 0, trs = 0;
             foreach (var x in All().Values)
                 if (x.calFlights > 0)
@@ -196,9 +198,9 @@ namespace K2D2.Lift.Next
                     double wi = Math.Min(5, x.calFlights);
                     w += wi; d += wi * Math.Log(x.calDrag); t += wi * x.calThrust; k += wi * x.calAoA; gsum += wi * Math.Log(x.calAoAGain > 0 ? x.calAoAGain : 1); trs += wi * x.calTrim;
                 }
-            if (w <= 0) return new LaunchCheck.Calibration();
-            return new LaunchCheck.Calibration { dragScale = Math.Exp(d / w), thrustScale = t / w, aoaBiasDeg = k / w, aoaGain = Math.Exp(gsum / w), trimDeg = trs / w,
-                                                 source = "average of calibrated designs" };
+            if (w <= 0) return WithS1Left(new LaunchCheck.Calibration(), r);
+            return WithS1Left(new LaunchCheck.Calibration { dragScale = Math.Exp(d / w), thrustScale = t / w, aoaBiasDeg = k / w, aoaGain = Math.Exp(gsum / w), trimDeg = trs / w,
+                                                 source = "average of calibrated designs" }, r);
         }
 
                 // ---------------------------------------------------------------- names
@@ -315,19 +317,72 @@ namespace K2D2.Lift.Next
             return r.calS1Loss;
         }
 
+        // ---- stage-1 leftover correction: a one-state Kalman filter (2026-11-15 pm).
+        // The first version moved half way to each flight's error, and three flights of R2-1 swung
+        // it -45 -> -1 -> -28 m/s (errors -45, +42, -55: the error depends on the ascent flown).
+        // Now each flight is a noisy measurement: the gain is large while the estimate is uncertain
+        // and small once flights agree, and a little process noise lets it follow a changed rocket.
+        // The sim plans with mean - 1 sd (PessimisticSd), so the margin to the debris cap follows
+        // how sure the estimate is instead of being one fixed number.
+        public const double S1LeftPriorSd = 40;     // m/s, before any flight
+        public const double S1LeftMeasureSd = 35;   // m/s, one flight's scatter (seen: -45, +42, -55)
+        public const double S1LeftDriftSd = 5;      // m/s per flight, the rocket/model changing
+        public const double PessimisticSd = 1.0;    // plan with mean - this x sd
+
+        static void S1LeftState(Record r, out double mean, out double var)
+        {
+            mean = r?.calS1Left ?? 0;
+            int n = r?.s1LeftFlights ?? 0;
+            if (r == null || n == 0) { mean = 0; var = S1LeftPriorSd * S1LeftPriorSd; return; }
+            // records from the half-way version have a mean but no variance: n flights' worth
+            var = r.calS1LeftVar > 0 ? r.calS1LeftVar : S1LeftMeasureSd * S1LeftMeasureSd / n;
+        }
+
+        static LaunchCheck.Calibration WithS1Left(LaunchCheck.Calibration c, Record r)
+        {
+            S1LeftState(r, out double mean, out double var);
+            c.s1LeftMeanDv = mean;
+            c.s1LeftSdDv = Math.Sqrt(var);
+            c.s1LeftBiasDv = mean - PessimisticSd * c.s1LeftSdDv;
+            return c;
+        }
+
         /// <summary>
-        /// After a cut-off: stage 1's real Δv left minus the sim's (unbiased) prediction. The first
-        /// flight sets it, later ones move it half way (newest weighted 1/2), like LearnS1BurnLoss.
+        /// After a cut-off: stage 1's real Δv left minus the sim's (unbiased) prediction, folded into
+        /// the Kalman estimate. Returns the new mean and standard deviation.
         /// </summary>
-        public static double LearnS1Left(Stage1Model model, string name, double errorDv)
+        public static (double mean, double sd) LearnS1Left(Stage1Model model, string name, double errorDv)
         {
             var r = GetOrAdd(model, name);
-            if (r == null) return 0;
+            if (r == null) return (0, S1LeftPriorSd);
             errorDv = Math.Max(-300, Math.Min(300, errorDv));
-            r.calS1Left = r.s1LeftFlights == 0 ? errorDv : 0.5 * r.calS1Left + 0.5 * errorDv;
+            S1LeftState(r, out double mean, out double var);
+            var += S1LeftDriftSd * S1LeftDriftSd;                          // predict
+            double gain = var / (var + S1LeftMeasureSd * S1LeftMeasureSd); // update
+            mean += gain * (errorDv - mean);
+            var *= 1 - gain;
+            r.calS1Left = mean;
+            r.calS1LeftVar = var;
             r.s1LeftFlights++;
             Save();
-            return r.calS1Left;
+            return (mean, Math.Sqrt(var));
+        }
+
+        /// <summary>The weights the last pad launch of this design flew, for training's trust region.</summary>
+        public static BehaviourWeights? GetFlownWeights(Stage1Model model)
+        {
+            var r = Get(model);
+            if (r == null) return null;
+            // records from before flownWeights: the stored weights are the ones the last launch flew
+            return r.flownWeights ?? ((r.realScores?.Count ?? 0) > 0 ? r.weights : null);
+        }
+
+        public static void RecordFlownWeights(Stage1Model model, string name, BehaviourWeights w)
+        {
+            var r = GetOrAdd(model, name);
+            if (r == null) return;
+            r.flownWeights = w;
+            Save();
         }
 
         public static void RecordRealScore(Stage1Model model, string name, double score)

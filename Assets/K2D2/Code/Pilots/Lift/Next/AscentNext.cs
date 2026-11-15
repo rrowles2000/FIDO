@@ -573,9 +573,10 @@ namespace K2D2.Lift.Next
                         (arbiter.behaviour == Behaviour.CutOff || arbiter.behaviour == Behaviour.BurntOut))
                     {
                         double err = s1_left - check.stage1LeftRawDv;
-                        double learned = CraftMemory.LearnS1Left(model, vessel.Name, err);
+                        var (mean, sd) = CraftMemory.LearnS1Left(model, vessel.Name, err);
                         logger.LogInfo($"[Train] S1 LEFT sim {check.stage1LeftRawDv:n0} m/s, real {s1_left:n0} m/s ({err:+0;-0;0}) -> " +
-                                       $"learned bias {learned:+0;-0;0} m/s (was {calibration.s1LeftBiasDv:+0;-0;0})");
+                                       $"learned {mean:+0;-0;0}±{sd:0} m/s (was {calibration.s1LeftMeanDv:+0;-0;0}±{calibration.s1LeftSdDv:0}); " +
+                                       $"next plan uses {mean - CraftMemory.PessimisticSd * sd:+0;-0;0}");
                     }
                     logger.LogInfo("[Next] PREDICTED -> ACTUAL at cut-off: " +
                                    $"T+ {Delta(p ? check.cutT : N, c.ut - launch_ut, " s")}, " +
@@ -598,7 +599,10 @@ namespace K2D2.Lift.Next
                     logger.LogInfo("[Next] PREDICTED -> ACTUAL: the run stopped before cut-off");
                 // pad launches only (check is null for a mid-air start)
                 if (check != null && model != null && model.valid)
+                {
                     CraftMemory.RecordFlight(model, vessel.Name, rec);
+                    CraftMemory.RecordFlownWeights(model, vessel.Name, ctx.weights); // training's trust-region anchor
+                }
 
                 foreach (var v in AllVessels())
                 {

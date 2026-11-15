@@ -21,12 +21,14 @@ namespace K2D2.Training
 
         public ILogger logger = ReduxLib.ReduxLib.GetLogger("K2D2.Training");
 
-        public Setting<int> flights = new("training.flights", MaxFlights);
+        public Setting<int> flights = new("training.flights", DefaultFlights);
 
         // 2026-11-14: the game froze on the 7th flight in a row, then crashed in d3d11 (DXVK)
         // reloading the scene after the 4th revert - sessions are capped at the most that has
         // completed cleanly; restart the game between sessions
-        public const int MaxFlights = 3;
+        // the 3-flight cap (above) was lifted at the player's request on 2026-11-15; if the game
+        // freezes or crashes after many reverts again, restart it between sessions
+        public const int DefaultFlights = 3;
 
         public const int MaxFailsInARow = 3;
         const float PadSettleSeconds = 5, ResultPauseSeconds = 3, RevertTimeoutSeconds = 120;
@@ -70,7 +72,7 @@ namespace K2D2.Training
             if (isRunning) return;
             string problem = StartProblem();
             if (problem != null) { SetStatus(problem, false); return; }
-            target = Mathf.Clamp(flights.V, 1, MaxFlights);
+            target = Mathf.Max(1, flights.V);
             done = ok_count = fails_in_a_row = 0;
             results.Clear();
             logger.LogInfo($"[Training] start: {target} flights");

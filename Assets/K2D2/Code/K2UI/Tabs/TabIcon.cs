@@ -48,7 +48,7 @@ namespace K2UI.Tabs
 
         static bool Known(string c) => c switch
         {
-            "mission" or "node" or "lift" or "landing" or "dock" or "attitude" or "sats" or "training" or "about" => true,
+            "mission" or "node" or "lift" or "landing" or "dock" or "attitude" or "sats" or "constellation" or "training" or "about" => true,
             _ => false,
         };
 
@@ -144,7 +144,8 @@ namespace K2UI.Tabs
                     Circle(11, 11, 0.9f, true);
                     break;
 
-                case "sats": // a satellite: body, two solar panels, antenna
+                case "sats":
+                case "constellation": // a satellite: body, two solar panels, antenna
                     Closed(false, P(9, 8.5f), P(13, 8.5f), P(13, 13.5f), P(9, 13.5f));
                     Closed(false, P(1.5f, 9), P(7, 9), P(7, 13), P(1.5f, 13));
                     Closed(false, P(15, 9), P(20.5f, 9), P(20.5f, 13), P(15, 13));

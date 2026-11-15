@@ -203,7 +203,8 @@ namespace K2D2.Constellation
             row.Add(speech);
             group.Add(row);
 
-            var progress = new K2ProgressBar { name = "progress" };
+            // Min/Max: FullStatus.Progress gives 0-100; left at 0/0 the bar always drew full (2026-11-15)
+            var progress = new K2ProgressBar { name = "progress", Min = 0, Max = 100 };
             progress.style.height = 25;
             group.Add(progress);
             return group;

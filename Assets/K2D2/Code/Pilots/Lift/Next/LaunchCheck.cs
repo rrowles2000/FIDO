@@ -45,10 +45,11 @@ namespace K2D2.Lift.Next
             // stage 1's real Δv left at cut-off minus the sim's (2026-11-15: -20..-34 m/s on the 83 t
             // design - ~0.4 t more fuel burned on the way up than modelled). Added to the sim's
             // leftover, so training keeps a real margin to the debris cap instead of the sim's 2-4 m/s.
-            public double s1LeftBiasDv = 0;
+            public double s1LeftBiasDv = 0;   // what the sim adds: the learned mean - 1 sd (CraftMemory.WithS1Left)
+            public double s1LeftMeanDv = 0, s1LeftSdDv = 0; // the estimate behind it, for the log
             public string source = "default";
             public Calibration Clone() => (Calibration)MemberwiseClone();
-            public override string ToString() => $"drag ×{dragScale:n2}, thrust ×{thrustScale:n3}, nose {aoaBiasDeg:+0.00;-0.00}°, AoA ×{aoaGain:n2}, trim {trimDeg:+0.00;-0.00}, S1 burn loss {s1BurnLossDv:n0} m/s, S1 left {s1LeftBiasDv:+0;-0;0} m/s ({source})";
+            public override string ToString() => $"drag ×{dragScale:n2}, thrust ×{thrustScale:n3}, nose {aoaBiasDeg:+0.00;-0.00}°, AoA ×{aoaGain:n2}, trim {trimDeg:+0.00;-0.00}, S1 burn loss {s1BurnLossDv:n0} m/s, S1 left {s1LeftMeanDv:+0;-0;0}±{s1LeftSdDv:0} m/s (planned with {s1LeftBiasDv:+0;-0;0}) ({source})";
         }
 
         /// <summary>One point of the simulated ascent, for the [Next] PLAN log and the model export.</summary>

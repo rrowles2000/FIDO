@@ -55,7 +55,7 @@ namespace K2D2.Training
             vehicle_label.style.marginTop = 6;
             page.Add(vehicle_label);
 
-            flights_field = new IntegerField($"Flights (max {TrainingPilot.MaxFlights})") { isDelayed = true };
+            flights_field = new IntegerField("Flights") { isDelayed = true };
             flights_field.Bind(pilot.flights);
             flights_field.style.marginTop = 6;
             page.Add(flights_field);

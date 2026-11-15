@@ -29,6 +29,14 @@ namespace K2D2.Lift.Next
         const double StartSigma = 0.15, MinSigma = 0.01;
         const long MaxMillis = 4000; // stop early rather than freeze the pad for long
 
+        // Trust region (2026-11-15 pm): once a design has flown, training may move each trained
+        // number at most this far (as a share of its range, the same 0..1 scale the search uses)
+        // from the weights that flew last. The simulator is only trustworthy near ascents that
+        // have been flown and calibrated; on R2-1's second flight with the new stage-1 correction,
+        // training jumped to a much steeper ascent (Kp 4.8 -> 1.5, maxAoA 3 -> 6°) that the sim
+        // then got wrong by 40 m/s the other way.
+        public const double TrustRadius = 0.10;
+
         // the trained numbers, mapped to 0..1 (log scale for the scale-like ones)
         static readonly (string name, double lo, double hi, bool log)[] Params =
         {
@@ -106,8 +114,19 @@ namespace K2D2.Lift.Next
         public static double PeSep(LaunchCheck.Result r) => r.s1ApBurnDv > 0 && !double.IsNaN(r.debrisPeKm) ? r.debrisPeKm : r.cutPeKm;
 
         public static Outcome Train(Stage1Model model, PolicyContext ctx, double headingDeg, double targetApKm,
-                                    LaunchCheck.Calibration calibration, BehaviourWeights start, double capKm, ILogger log)
+                                    LaunchCheck.Calibration calibration, BehaviourWeights start, double capKm, ILogger log,
+                                    BehaviourWeights? anchor = null, double radius = TrustRadius)
         {
+            // the search box: the whole range, or the trust region around the flown weights
+            var lo = new double[Params.Length];
+            var hi = new double[Params.Length];
+            for (int i = 0; i < Params.Length; i++)
+            {
+                double a = anchor.HasValue ? ToUnit(i, Get(anchor.Value, i)) : 0.5;
+                lo[i] = anchor.HasValue ? Math.Max(0, a - radius) : 0;
+                hi[i] = anchor.HasValue ? Math.Min(1, a + radius) : 1;
+            }
+            if (anchor.HasValue) start = anchor.Value;
             var clock = Stopwatch.StartNew();
             var o = new Outcome();
             int sims = 0;
@@ -123,11 +142,15 @@ namespace K2D2.Lift.Next
             var best_r = Fly(best_w);
             double best_s = Score(best_r, ctx, capKm);
             o.startScore = best_s;
-            // the hand-picked defaults compete too, in case the stored weights went somewhere bad
-            var d = BehaviourWeights.Default;
-            var dr = Fly(d);
-            double ds = Score(dr, ctx, capKm);
-            if (ds > best_s) { best_w = d; best_r = dr; best_s = ds; }
+            // the hand-picked defaults compete too, in case the stored weights went somewhere bad -
+            // but only before the design has flown: after that, outside the trust region
+            if (!anchor.HasValue)
+            {
+                var d = BehaviourWeights.Default;
+                var dr = Fly(d);
+                double ds = Score(dr, ctx, capKm);
+                if (ds > best_s) { best_w = d; best_r = dr; best_s = ds; }
+            }
 
             var rng = new Random(model?.phases?.Count > 0 ? (int)(model.phases[0].startMass * 1000) : 1);
             double sigma = StartSigma;
@@ -139,7 +162,7 @@ namespace K2D2.Lift.Next
                 {
                     var w = parent;
                     for (int i = 0; i < Params.Length; i++)
-                        Set(ref w, i, FromUnit(i, ToUnit(i, Get(parent, i)) + sigma * Gauss(rng)));
+                        Set(ref w, i, FromUnit(i, Math.Max(lo[i], Math.Min(hi[i], ToUnit(i, Get(parent, i)) + sigma * Gauss(rng)))));
                     var r = Fly(w);
                     double s = Score(r, ctx, capKm);
                     if (s > best_s + 1e-6) { best_s = s; best_w = w; best_r = r; improved = true; }
@@ -152,7 +175,7 @@ namespace K2D2.Lift.Next
             o.best = best_r;
             o.sims = sims;
             o.millis = clock.ElapsedMilliseconds;
-            log?.LogInfo($"[Train] {o.Summary()}");
+            log?.LogInfo($"[Train] {o.Summary()}" + (anchor.HasValue ? $" (trust region ±{radius:0.00} around the flown weights)" : " (no flights yet: full range)"));
             log?.LogInfo($"[Train] weights: {best_w}");
             return o;
         }
@@ -166,7 +189,7 @@ namespace K2D2.Lift.Next
         {
             if (model == null || !model.valid) return null;
             var start = CraftMemory.GetWeights(model) ?? BehaviourWeights.Default;
-            var o = Train(model, ctx, headingDeg, targetApKm, calibration, start, capKm, log);
+            var o = Train(model, ctx, headingDeg, targetApKm, calibration, start, capKm, log, CraftMemory.GetFlownWeights(model));
             ctx.weights = o.weights;
             CraftMemory.SaveTraining(model, name, o.weights, o.score);
             return o;
