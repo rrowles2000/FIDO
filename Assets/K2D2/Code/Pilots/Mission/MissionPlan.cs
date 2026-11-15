@@ -178,9 +178,9 @@ namespace K2D2.Mission
                     new ParamDef("ap_km", "Target apoapsis (km)", ParamKind.Float, "85"),
                     new ParamDef("inclination", "Inclination (°)", ParamKind.Float, "0", "90 = polar"),
                     new ParamDef("south", "Launch southward", ParamKind.Bool, "false"),
-                    new ParamDef("optimiser", "Stage 1 optimiser (disposal ascent)", ParamKind.Bool, "true",
+                    new ParamDef("optimiser", "Burn stage 1's leftover at apoapsis, then drop it", ParamKind.Bool, "true",
                         "needs a separator marked 'Stage 1 separator'"),
-                    new ParamDef("pe_cap_km", "Stage 1 max periapsis (km)", ParamKind.Float, "45"),
+                    new ParamDef("pe_cap_km", "Stage 1 max periapsis (km)", ParamKind.Float, "55"),
                 },
                 presets =
                 {

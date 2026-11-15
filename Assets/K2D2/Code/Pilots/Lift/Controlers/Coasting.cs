@@ -1,3 +1,6 @@
+// Coast from the New system's cut-off to the edge of the atmosphere. This is the original K2-D2
+// Redux coasting controller (upstream 1.3.0, as backported in d800d2e); the Classic and Optimiser
+// lift systems that also used it were removed 2026-11-15 (Archive/lift-legacy-2026-11-15/).
 
 using K2D2.KSPService;
 using KSP.Sim;
@@ -69,8 +72,7 @@ namespace K2D2.Lift
 
         public override void Update()
         {
-            // stage-1 disposal always warps the coast (nose surface-prograde, least drag)
-            if (!lift_settings.coasting_warp.V && !lift_settings.disposal_enabled.V)
+            if (!lift_settings.coasting_warp.V)
                 lift.NextMode();
 
             current_altitude_km = (float)(current_vessel.GetSeaAltitude() / 1000);
@@ -112,8 +114,7 @@ namespace K2D2.Lift
                 // default) FinalCircularize now creates and flies the circularize burn itself
                 // (see Final.cs), so there's nothing left for the player to manually do here and
                 // no reason to interrupt the flight.
-                // stage-1 disposal still has its apoapsis burn to do (Stage1Burn) - don't pause here
-                if (!lift_settings.auto_circularize.V && lift_settings.pause_on_final.V && !lift_settings.disposal_enabled.V)
+                if (!lift_settings.auto_circularize.V && lift_settings.pause_on_final.V)
                 {
                     TimeWarpTools.SetRateIndex(0, false);
                     TimeWarpTools.SetIsPaused(true);

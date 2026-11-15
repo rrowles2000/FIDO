@@ -16,8 +16,6 @@ namespace K2D2.Lift
 
         public FullStatus status_bar;
 
-        K2Slider end_rotate_ratio, mid_rotate_ratio;
-
         Label heading_label;
 
         VisualElement final_grp;
@@ -30,39 +28,24 @@ namespace K2D2.Lift
             LiftSettings settings = pilot.settings;
 
             status_bar = new FullStatus(panel);
-            panel.Q<IntegerField>("start_altitude_km").Bind(settings.start_altitude_km);
-            mid_rotate_ratio = panel.Q<K2Slider>("mid_rotate_ratio").Bind(settings.mid_rotate_ratio);
-            end_rotate_ratio = panel.Q<K2Slider>("end_rotate_ratio").Bind(settings.end_rotate_ratio);
             panel.Q<IntegerField>("destination_Ap_km").Bind(settings.destination_Ap_km);
+
+            // The bundle's Lift.uxml still has the Classic/Optimiser controls (removed 2026-11-15,
+            // Archive/lift-legacy-2026-11-15/): the profile altitudes and its graph, the roll
+            // program and the old throttle cap. The bundle can't be rebuilt here, so hide them.
+            foreach (var name in new[] { "start_altitude_km", "mid_rotate_ratio", "end_rotate_ratio", "graph",
+                                         "roll_program", "roll_program_settings", "max_throttle" })
+                panel.Q<VisualElement>(name)?.Show(false);
 
             lift_infos_el = panel.Q<VisualElement>("lift_infos");
 
             final_grp = panel.Q<VisualElement>("final_grp");
 
-            settings.mid_rotate_ratio.listeners += v =>
-            {
-                if (end_rotate_ratio.value < v)
-                    end_rotate_ratio.value = v;
-            };
-
-            settings.end_rotate_ratio.listeners += v =>
-            {
-                if (mid_rotate_ratio.value > v)
-                    mid_rotate_ratio.value = v;
-            };
-
             heading_label = panel.Q<Label>("heading_label");
             var heading = panel.Q<K2Compass>("heading").Bind(settings.heading);
 
             BuildPolarLaunch(panel.Q<Foldout>("profile"), settings);
-            stage1_ui = new K2D2.Lift.Stage1.Stage1UI(settings);
-            stage1_ui.Build(panel);
-            BuildModeSelector(panel, settings);
-
-            var graph = panel.Q<VisualElement>("graph");
-            pilot.ascent_path.InitUI(graph);
-
-            var max_throttle = panel.Q<K2Slider>("max_throttle").Bind(settings.max_throttle);
+            BuildSystemSection(panel, settings);
 
             var run_button = panel.Q<ToggleButton>("run");
             pilot.is_running_event += is_running => run_button.Value = is_running;
@@ -89,54 +72,17 @@ namespace K2D2.Lift
             return true;
         }
 
-        K2D2.Lift.Stage1.Stage1UI stage1_ui;
         K2D2.Lift.Next.NextUI next_ui;
 
-        // LIFT SYSTEM: picks which ascent system flies (LiftSettings.LiftMode). Built in code and
-        // placed under the tab title, above the Stage 1 optimiser controls (which only the
-        // Optimiser system uses).
-        void BuildModeSelector(VisualElement panel, LiftSettings settings)
+        // LIFT SYSTEM foldout (Next/NextUI) under the tab title. Until 2026-11-15 a selector here
+        // chose between the Classic, Optimiser and New systems; only the New one is left.
+        void BuildSystemSection(VisualElement panel, LiftSettings settings)
         {
-            var box = new VisualElement();
-            box.style.marginBottom = 6;
-
-            var row = new VisualElement();
-            row.AddToClassList("k2-slider-label-row");
-            row.Add(new Label("Lift System") { style = { fontSize = 13 } });
-            box.Add(row);
-
-            var selector = new InlineEnum();
-            selector.Bind(settings.mode, "Classic;Optimiser;New");
-            box.Add(selector);
-
-            var hint = new Label();
-            hint.AddToClassList("k2-slider-value-label");
-            hint.style.whiteSpace = WhiteSpace.Normal;
-            box.Add(hint);
-
             var title = panel.Q<Label>("Title");
-            var parent = title?.parent;
-            if (parent != null) parent.Insert(parent.IndexOf(title) + 1, box);
-            else panel.Insert(0, box);
-
-            // the New system's own settings sit right under the selector
+            var parent = title?.parent ?? panel;
+            int index = title != null ? parent.IndexOf(title) + 1 : 0;
             next_ui = new K2D2.Lift.Next.NextUI(settings);
-            next_ui.Build(box.parent ?? panel, (box.parent ?? panel).IndexOf(box) + 1);
-
-            settings.mode.listen(m =>
-            {
-                hint.text = m switch
-                {
-                    LiftMode.Classic => "Original K2-D2 ascent: profile climb, coast, adjust, circularise.",
-                    LiftMode.Optimiser => "Our ascent: adds stage-1 disposal and the optimiser below.",
-                    _ => "New lift system (Phase 0.1): 10 Hz layered loop and safety shield, pitch kick + gravity turn, launch check on the pad. No network yet.",
-                };
-                stage1_ui.SetVisible(m == LiftMode.Optimiser);
-                next_ui.SetVisible(m == LiftMode.New);
-            });
-
-            // the run keeps the system it started with - lock the selector while flying
-            pilot.is_running_event += running => selector.SetEnabled(!running);
+            next_ui.Build(parent, index);
         }
 
         Label polar_hint;
@@ -230,10 +176,6 @@ namespace K2D2.Lift
 
             LiftSettings settings = pilot.settings;
 
-            pilot.ascent_path.updateProfile(pilot.ascent.current_altitude_km);
-
-            end_rotate_ratio.ValueText = $"{settings.end_rotate_altitude_km:n0} km";
-            mid_rotate_ratio.ValueText = $"{settings.mid_rotate_altitude_km:n0} km";
             heading_label.text = $"{settings.heading.V:n1} °";
 
             if (polar_hint != null)
@@ -252,7 +194,7 @@ namespace K2D2.Lift
             status_bar.Reset();
             if (pilot.isRunning)
             {
-                status_bar.Warning($"Status : {pilot.status} ({pilot.mode})");
+                status_bar.Warning($"Status : {pilot.status}");
 
                 if (pilot.current_subpilot != null)
                     pilot.current_subpilot.updateUI(panel, status_bar);

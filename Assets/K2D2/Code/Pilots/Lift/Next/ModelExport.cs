@@ -73,8 +73,7 @@ namespace K2D2.Lift.Next
                     ["calibration"] = calibration,
                     ["check"] = check == null ? null : new Dictionary<string, object>
                     {
-                        ["summary"] = check.Summary(), ["verdict"] = check.verdict.ToString(), ["kickDeg"] = check.kickDeg,
-                        ["kickSpeed"] = check.kickSpeed, ["holdTwr"] = check.holdTwr, ["holdKm"] = check.holdKm,
+                        ["summary"] = check.Summary(), ["verdict"] = check.verdict.ToString(),
                         ["cutT"] = check.cutT, ["cutAltKm"] = check.altKm, ["cutSpeed"] = check.cutSpeed, ["cutPathDeg"] = check.cutPathDeg,
                         ["spareDv"] = check.spareDv, ["plan"] = check.plan,
                     },

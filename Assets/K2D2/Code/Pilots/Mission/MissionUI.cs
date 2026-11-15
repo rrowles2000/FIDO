@@ -28,7 +28,7 @@ namespace K2D2.Mission
         public static TabPage CreateTabPage() => new TabPage { name = Code, label = "Mission" };
 
         FullStatus status_bar;
-        VisualElement no_plan_el, plan_el, current_el, launch_el;
+        VisualElement no_plan_el, plan_el, current_el;
         Label current_title, current_detail, dv_label;
         ToggleButton run_button;
         Button skip_button, manual_button, reset_button;
@@ -77,9 +77,6 @@ namespace K2D2.Mission
             dv_label.AddToClassList("k2-slider-value-label");
             current_el.Add(dv_label);
 
-            launch_el = new VisualElement();
-            new K2D2.Lift.Stage1.Stage1UI(LiftPilot.Instance.settings).Build(launch_el, false);
-            current_el.Add(launch_el);
 
             run_button = new ToggleButton { label = "Go", name = "run" };
             run_button.AddToClassList("big");
@@ -178,7 +175,6 @@ namespace K2D2.Mission
                 current_title.text = plan.IsEmpty ? "Add some steps below" : "Mission complete";
                 current_detail.text = "";
                 dv_label.text = "";
-                launch_el.Show(false);
                 run_button.Show(false);
                 skip_button.Show(false);
                 manual_button.Show(false);
@@ -190,7 +186,6 @@ namespace K2D2.Mission
                 var vessel = K2D2_Plugin.Instance.current_vessel?.VesselComponent;
                 double dv = vessel?.VesselDeltaV?.TotalDeltaVVac ?? 0;
                 dv_label.text = $"Vessel Δv (vac): {dv:n0} m/s";
-                launch_el.Show(!running && step.type == StepCatalog.Launch && step.GetBool("optimiser") && vessel != null && vessel.Landed);
                 run_button.Show(true);
                 run_button.SetEnabled(running || pilot.GoProblem() == null);
                 skip_button.Show(true);

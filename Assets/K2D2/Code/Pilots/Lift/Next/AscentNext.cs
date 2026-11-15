@@ -17,8 +17,7 @@ namespace K2D2.Lift.Next
     /// NEW LIFT SYSTEM (LiftSettings.mode = New), Phase 0 - see the NN ascent report
     /// (reports/k2d2-behavioural-nn-ascent-report.rtf), Sections 3, 5, 7 and 11.
     ///
-    /// The layered loop the neural network will plug into, flown for now with the Optimiser's own
-    /// guidance as the policy, so the plumbing can be proven against a known-good ascent first:
+    /// The layered loop the neural network will plug into, flown by the behaviour model:
     ///
     ///   every frame   Update(): sample, run any due control ticks, re-apply the latched command
     ///   every 0.1 s   Tick():   arbiter (L3) -> policy (L2) -> shield (L1) -> latch
@@ -31,13 +30,14 @@ namespace K2D2.Lift.Next
     /// throttle and attitude during a run (LiftPilot resets the other pilots before starting).
     ///
     /// Settings are snapshotted at Start, so editing the Lift tab mid-flight can't change a run.
-    /// Stage-1 disposal and the roll program are not part of Phase 0.
     ///
-    /// Phase 0.1 (after the 2026-11-13 flights): GravityTurnPolicy (pitch kick + zero-AoA turn)
-    /// replaces the profile-following policy, which the shield wouldn't let turn the rocket; on the
-    /// pad LaunchCheck simulates this same loop, picks the kick and refuses a stage 1 that can't
-    /// get there; max-Q and Q·AoA limits are settings; heading correction goes through the shield;
-    /// loss of control for 3 s stops the run.
+    /// The policy is the behaviour model (Behaviours.cs, spec 2026-11-14): on the pad
+    /// BehaviourTrainer trains its weights in the calibrated simulator, LaunchCheck simulates the
+    /// result and refuses a stage 1 that can't get there, and after the flight the calibration,
+    /// the real score and the stage-1 burn loss are learned (CraftMemory). Heading correction goes
+    /// through the shield; loss of control for 3 s stops the run. The pre-behaviour-model path
+    /// (pitch kick + gravity turn, plan grid, PlanLearner, throttle holds, drift protection, the
+    /// shield's AoA and max-Q limits) was removed 2026-11-15 - Archive/lift-legacy-2026-11-15/.
     /// </summary>
     public class AscentNext : AscentBase
     {
@@ -45,7 +45,6 @@ namespace K2D2.Lift.Next
         public const double MaxGapS = 1.0;        // larger UT jumps reset the shield
         public const int MaxCatchUpTicks = 3;
         public const double LogPeriodS = 1.0;     // [Next] telemetry line
-        public const double FallbackClampS = 3.0; // AoA limit fighting the policy this long -> fallback
 
         public ILogger logger = ReduxLib.ReduxLib.GetLogger("K2D2.Ascent.Next");
 
@@ -54,9 +53,7 @@ namespace K2D2.Lift.Next
         readonly KSPVessel current_vessel;
 
         // layers
-        readonly IAscentPolicy primary_policy = new GravityTurnPolicy(); // the network goes here (Phase 2)
-        readonly IAscentPolicy fallback_policy = new GuidancePolicy();
-        readonly BehaviourPolicy behaviour_policy = new BehaviourPolicy(); // the behaviour model (ctx.blend)
+        readonly BehaviourPolicy behaviour_policy = new BehaviourPolicy(); // the network goes here later (Phase 2)
         double prev_speed = double.NaN, prev_speed_ut, speed_rate;
         IAscentPolicy policy;
         readonly SafetyShield shield = new();
@@ -97,7 +94,9 @@ namespace K2D2.Lift.Next
         // command with zero AoA commanded, seconds before loss of control. Logged so each vessel's
         // onset q / Mach is on record (ksplog dataset), not only whether it flipped.
         public const double DriftDeg = 1.5, DriftConfirmS = 0.5, DriftMinQKPa = 2;
-        public const double DriftProtectQKPa = 5; // below this the air can't overpower the steering
+        // drift below this surface speed is the liftoff settling (it was the kick before 2026-11-15)
+        // and isn't learned from
+        public const double EarlyDriftSpeed = 70;
         double drift_since, drift_calm_since;
         bool drift_logged;
         bool in_drift;
@@ -109,15 +108,17 @@ namespace K2D2.Lift.Next
         StabilityCheck.Result stability;
         LaunchCheck.Calibration calibration = new LaunchCheck.Calibration();
         readonly List<Calibrator.Sample> flight_samples = new();
-        bool limiter_engaged;
         double next_sample_t;
-        // for CraftMemory: the last drift outside the kick, the first loss-of-control point, top Mach
+        // for CraftMemory: the last drift after liftoff, the first loss-of-control point, top Mach
         double learn_onset_peak;
         bool episode_counts;
         double learn_onset_mach = double.NaN, learn_onset_q, learn_onset_thrust, loc_mach = double.NaN, loc_q, loc_thrust, loc_alt, max_mach;
 
         // full-throttle thrust, estimated as thrust / throttle (as LaunchCheck does in the sim)
         double full_thrust_est;
+
+        /// <summary>UT of liftoff (-1 before it), for LiftPilot's telemetry line.</summary>
+        public double LaunchUT => launch_ut;
 
         // Adjust reads the Ap rate (see computeValues)
         float last_ap_km;
@@ -149,7 +150,7 @@ namespace K2D2.Lift.Next
             heading_deg = settings.heading.V;
             heading_correction_on = settings.heading_correction.V;
 
-            policy = ctx.blend ? behaviour_policy : primary_policy;
+            policy = behaviour_policy;
             prev_speed = double.NaN;
             speed_rate = 0;
             shield.Reset();
@@ -174,7 +175,6 @@ namespace K2D2.Lift.Next
             launch_mass = vessel?.totalMass ?? 0;
             full_thrust_est = 0;
             flight_samples.Clear();
-            limiter_engaged = false;
             next_sample_t = 0;
             drift_since = -1;
             drift_calm_since = -1;
@@ -186,7 +186,6 @@ namespace K2D2.Lift.Next
             episode_counts = false;
             loc_mach = double.NaN;
             max_mach = 0;
-            shield.protect = false;
             DebrisTracker.Snapshot();
             drift_peak_deg = drift_peak_q = drift_peak_mach = drift_peak_alt = 0;
             drift_onset_q = double.NaN;
@@ -201,15 +200,8 @@ namespace K2D2.Lift.Next
             PlanetLog.Log(logger, vessel, settings.destination_Ap_km.V);
             RunLaunchCheck(vessel);
             logger.LogInfo($"[Next] start: policy {policy.Name}, {1 / TickS:n0} Hz, target Ap {settings.destination_Ap_km.V} km " +
-                           $"(circular {body.orbitSpeedAtTarget:n0} m/s), heading {heading_deg:n1}°, kick {ctx.kickDeg:n1}° at {(ctx.kickSpeed > 0 ? ctx.kickSpeed : GravityTurnPolicy.DefaultKickSpeed):n0} m/s" +
-                           (ctx.holdTwr > 0 ? $", TWR held at {ctx.holdTwr:n1} to {ctx.holdKm:n0} km" : "") +
-                           $"{(settings.next_kick_auto.V && check != null && check.verdict != LaunchCheck.Verdict.Unknown ? " (auto)" : "")}, " +
-                           $"max Q {ctx.maxQKPa:n0} kPa, Q·AoA {ctx.qAlphaKPaDeg:n1} kPa·°, profile 90° to {ctx.startKm:n1} km, " +
-                           $"45° at {ctx.midKm:n1} km, ~0° at {ctx.endKm:n1} km, max throttle {ctx.maxThrottle:n2}");
-            if (ctx.blend)
-                logger.LogInfo($"[Next] BEHAVIOUR MODEL: 3 weighted behaviours, no kick / plan grid / AoA limit / max-Q throttle-back; weights: {ctx.weights}");
-            if (settings.roll_program.V)
-                logger.LogInfo("[Next] roll program is on in the Lift settings but not part of the New system yet - ignored");
+                           $"(circular {body.orbitSpeedAtTarget:n0} m/s), heading {heading_deg:n1}°, max throttle {ctx.maxThrottle:n2}, " +
+                           $"max Q {ctx.maxQKPa:n0} kPa (scored), heading Q·AoA {ctx.qAlphaKPaDeg:n1} kPa·°; weights: {ctx.weights}");
         }
 
         // ---------------------------------------------------------------- frame loop
@@ -296,11 +288,7 @@ namespace K2D2.Lift.Next
                                         K2D2.Controller.StagingSettings.auto_staging.V, out AscentCommand wanted);
             status = arbiter.status;
 
-            // drift protection: fly straight down the airflow, nothing that adds AoA (kick, pull-down)
-            if (shield.protect && !ctx.blend && arbiter.behaviour == Behaviour.Fly && obs.hasPath)
-                wanted.elevationDeg = obs.pathDeg;
             if (arbiter.behaviour == Behaviour.Fly) max_mach = Math.Max(max_mach, obs.mach);
-            if (arbiter.behaviour == Behaviour.Fly && shield.report.bucket < 0.98f) limiter_engaged = true;
             if (shield.report.lossOfControl && double.IsNaN(loc_mach))
             {
                 loc_mach = obs.mach;
@@ -312,17 +300,8 @@ namespace K2D2.Lift.Next
             // L1: everything passes the shield
             var safe = shield.Apply(wanted, obs, ctx, TickS);
 
-            // Policy fallback: garbage output, or the AoA limit fighting it for too long. The
-            // second test is only for a learned policy: the hand-written ones lean on the AoA
-            // limit by design (the gravity turn holds its kick below the path until the path
-            // comes down to it).
-            bool fighting = policy is ILearnedPolicy && shield.report.clampedSeconds > FallbackClampS;
-            if (policy != fallback_policy && (shield.report.rejected || fighting))
-            {
-                logger.LogWarning($"[Next] policy {policy.Name} -> fallback {fallback_policy.Name}: " +
-                                  (shield.report.rejected ? "invalid output" : $"AoA limit held it off for {shield.report.clampedSeconds:n1} s"));
-                policy = fallback_policy;
-            }
+            if (shield.report.rejected)
+                logger.LogWarning($"[Next] policy {policy.Name} gave an invalid command - the shield kept the last good one");
 
             heading_correction = shield.LimitHeading(heading_correction_on ? HeadingCorrection() : 0,
                                                      obs, safe.elevationDeg, ctx, TickS);
@@ -366,8 +345,9 @@ namespace K2D2.Lift.Next
 
         // ---------------------------------------------------------------- launch check
 
-        // On the pad: simulate this loop for the vessel, take the best kick (auto) and refuse a
-        // stage 1 that can't reach the target (setting). Off the pad (a mid-air start) it's skipped.
+        // On the pad: train the behaviour model for the vessel in the calibrated simulator, simulate
+        // the result, and refuse a stage 1 that can't reach the target (setting). Off the pad (a
+        // mid-air start) it's skipped.
         void RunLaunchCheck(VesselComponent vessel)
         {
             if (vessel == null || !vessel.Landed)
@@ -381,34 +361,12 @@ namespace K2D2.Lift.Next
             logger.LogInfo($"[Next] MEMORY {CraftMemory.Key(model)}: {CraftMemory.Describe(model)}");
             calibration = CraftMemory.GetCalibration(model);
             logger.LogInfo($"[Next] CALIB using {calibration}");
-            if (ctx.blend)
-            {
-                double cap = settings.Stage1CapKm(LiftMode.New, body.hasAtmosphere ? body.atmosphereDepth / 1000 : 0);
-                var trained = BehaviourTrainer.TrainForLaunch(model, ref ctx, heading_deg, settings.destination_Ap_km.V, calibration, cap, vessel.Name, logger);
-                predicted_score = trained?.score ?? double.NaN;
-            }
-            check = LaunchCheck.Run(model, ctx, heading_deg, settings.destination_Ap_km.V,
-                                    settings.next_kick_auto.V ? (double?)null : settings.next_kick_deg.V, calibration);
-            // choose among the safe plans from measured results (PlanLearner); training flights
-            // before the last explore, everything else flies the best estimate
-            if (settings.next_kick_auto.V && !ctx.blend)
-            {
-                bool explore = K2D2.Training.TrainingPilot.Instance?.ExploreNext ?? false;
-                try { check = PlanLearner.Choose(model, ctx, heading_deg, settings.destination_Ap_km.V, check, calibration, explore, logger); }
-                catch (Exception e) { logger.LogWarning("[Learn] choice failed, flying the launch check's plan: " + e.Message); }
-            }
-            logger.LogInfo($"[Next] launch check ({check.kicksTried} kick(s) simulated): {check.Summary()}");
-            foreach (var line in check.Table()) logger.LogInfo("[Next]   " + line);
+            var trained = BehaviourTrainer.TrainForLaunch(model, ref ctx, heading_deg, settings.destination_Ap_km.V, calibration, CapKm(), vessel.Name, logger);
+            predicted_score = trained?.score ?? double.NaN;
+            check = LaunchCheck.Run(model, ctx, heading_deg, settings.destination_Ap_km.V, calibration);
+            logger.LogInfo($"[Next] launch check: {check.Summary()}");
             if (check.verdict == LaunchCheck.Verdict.Unknown) return;
 
-            if (settings.next_kick_auto.V)
-            {
-                ctx.kickDeg = check.kickDeg;
-                ctx.kickSpeed = check.kickSpeed;
-                ctx.holdTwr = check.holdTwr;
-                ctx.holdKm = check.holdKm;
-                ctx.pullDownDeg = check.pullDownDeg;
-            }
             if (check.plan != null)
                 foreach (var p in check.plan)
                     logger.LogInfo($"[Next] PLAN T+{p.t:n1} alt {p.altKm:n2} km, v {p.v:n0} m/s, path {p.path:n1}, cmd {p.cmd:n1}, " +
@@ -416,13 +374,11 @@ namespace K2D2.Lift.Next
             ModelExport.Write(model, ctx, heading_deg, settings.destination_Ap_km.V, check, calibration, vessel.Name);
             if (check.verdict == LaunchCheck.Verdict.Short && settings.next_refuse_short.V)
                 pending_refusal = $"Launch refused - {check.Short()}. Turn off 'Refuse if stage 1 is short' to fly anyway.";
-            else if (check.authorityShort && settings.next_refuse_short.V)
-                pending_refusal = $"Launch refused - this design has lost steering before ({CraftMemory.Describe(model)}) and no ascent keeps " +
-                                  $"thrust/q above {check.neededThrustPerQ:n0} kN/kPa (best {check.minThrustPerQ:n0}). Add thrust or move fins aft, " +
-                                  "or turn off 'Refuse if stage 1 is short' to fly anyway.";
             else if (check.verdict == LaunchCheck.Verdict.NoCircularise)
                 logger.LogWarning("[Next] launch check: reaches the target but can't circularise - flying anyway");
         }
+
+        double CapKm() => settings.Stage1CapKm(body.hasAtmosphere ? body.atmosphereDepth / 1000 : 0);
 
         // Nose vs what SAS was asked to hold last tick, while flying in real air. Every episode is
         // logged - onset (over DriftDeg for DriftConfirmS) and recovery (under half that for 1 s) -
@@ -452,9 +408,7 @@ namespace K2D2.Lift.Next
                     if (obs.ut - drift_calm_since >= 1)
                     {
                         in_drift = false;
-                        logger.LogInfo($"[Next] DRIFT #{drift_episodes} recovered after {obs.ut - episode_start:n1} s, peak {episode_peak:n1}°" +
-                                       (shield.protect ? " - protection off" : ""));
-                        shield.protect = false;
+                        logger.LogInfo($"[Next] DRIFT #{drift_episodes} recovered after {obs.ut - episode_start:n1} s, peak {episode_peak:n1}°");
                     }
                 }
                 else drift_calm_since = -1;
@@ -474,21 +428,16 @@ namespace K2D2.Lift.Next
             drift_onset_mach = obs.mach;
             drift_onset_alt = obs.altitude;
             drift_onset_t = obs.ut - launch_ut;
-            double kick_end = (ctx.kickSpeed > 0 ? ctx.kickSpeed : GravityTurnPolicy.DefaultKickSpeed) + GravityTurnPolicy.KickRampSpeed;
-            bool in_kick = obs.airSpeed < kick_end + 20;
-            string phase = in_kick ? " (during the kick)" : "";
-            episode_counts = !in_kick;
-            if (!in_kick)
+            bool early = obs.airSpeed < EarlyDriftSpeed;
+            string phase = early ? " (just after liftoff)" : "";
+            episode_counts = !early;
+            if (!early)
             {
+                // drift is scored (BehaviourTrainer.RealScore) and remembered, not overridden
                 learn_onset_peak = abs_err;
                 learn_onset_mach = obs.mach;
                 learn_onset_q = obs.qKPa;
                 learn_onset_thrust = obs.thrustKN;
-                if (obs.qKPa >= DriftProtectQKPa && !ctx.blend) // behaviour model: drift is scored, not overridden
-                {
-                    shield.protect = true;
-                    phase += " - PROTECTION ON: zero AoA, full thrust for steering, heading correction frozen";
-                }
             }
             logger.LogWarning($"[Next] DRIFT #{drift_episodes} onset T+{drift_onset_t:n1} at {obs.altitude / 1000:n2} km{phase}: nose {err:+0.0;-0.0}° in pitch / " +
                               $"{obs.sideslipDeg:+0.0;-0.0}° sideways off its command (roll {obs.rollRateDegS:+0.0;-0.0}°/s, " +
@@ -543,6 +492,8 @@ namespace K2D2.Lift.Next
         {
             if (summary_logged || launch_ut < 0) return; // never left the pad (refused / aborted)
             summary_logged = true;
+            var rec = new CraftMemory.FlightRecord { when = DateTime.Now.ToString("yyyy-MM-dd HH:mm"), ok = ok, simScore = predicted_score,
+                                                     sepPeKm = sepPe, driftDeg = drift_peak_deg, maxQKPa = max_q_so_far };
             try
             {
                 var vessel = current_vessel?.VesselComponent;
@@ -559,13 +510,7 @@ namespace K2D2.Lift.Next
                 logger.LogInfo($"[Next] RESULT {(ok ? "OK" : "NOT OK")}: {state} | T+{now - launch_ut:n0} s, " +
                                $"Ap {ap:n1} Pe {pe:n1} km, inc {orbit.inclination:n2}°, ecc {orbit.eccentricity:n4}, " +
                                $"mass {launch_mass:n2} -> {vessel.totalMass:n2} t, Δv left (game) {(double.IsNaN(dv_now) ? "n/a" : dv_now.ToString("n0"))} m/s, " +
-                               $"heading {heading_deg:n1}°, kick {ctx.kickDeg:n1}° at {ctx.kickSpeed:n0} m/s" +
-                               (ctx.holdTwr > 0 ? $", TWR held at {ctx.holdTwr:n1} to {ctx.holdKm:n0} km" : "") +
-                               $", max throttle {ctx.maxThrottle:n2}, max Q {ctx.maxQKPa:n0}, Q·AoA {ctx.qAlphaKPaDeg:n1}");
-                // what this plan achieved, for PlanLearner (pad launches only: check is null otherwise)
-                if (check != null && check.verdict != LaunchCheck.Verdict.Unknown && settings.next_kick_auto.V && !ctx.blend)
-                    PlanLearner.Record(model, vessel.Name, ctx, settings.destination_Ap_km.V, heading_deg, ok, state,
-                                       vessel.totalMass, check.spareDv, logger);
+                               $"heading {heading_deg:n1}°, max throttle {ctx.maxThrottle:n2}, max Q {ctx.maxQKPa:n0}, weights {ctx.weights}");
                 // calibration: refit the model factors so the flown plan re-simulates to this flight
                 if (model != null && model.valid && have_cut && cut_obs.hasPath &&
                     (arbiter.behaviour == Behaviour.CutOff || arbiter.behaviour == Behaviour.BurntOut))
@@ -573,17 +518,18 @@ namespace K2D2.Lift.Next
                     var fit = Calibrator.Run(model, ctx, heading_deg, settings.destination_Ap_km.V, calibration, flight_samples,
                                              cut_obs.ut - launch_ut, cut_obs.ut - launch_ut, cut_obs.airSpeed, cut_obs.pathDeg);
                     logger.LogInfo("[Next] CALIB " + fit.Summary());
+                    if (fit.ok) { rec.calRmsBefore = fit.rmsBefore; rec.calRmsAfter = fit.rmsAfter; }
                     if (fit.ok) CraftMemory.SaveCalibration(model, vessel.Name, fit.after);
                 }
-                if (model != null && model.valid)
-                    CraftMemory.LearnQHold(model, vessel.Name, max_q_so_far, ctx.maxQKPa,
-                                           ctx.qHoldFraction > 0 ? ctx.qHoldFraction : SafetyShield.QHoldFraction, limiter_engaged);
-                if (ctx.blend && check != null && model != null && model.valid)
+                if (check != null && model != null && model.valid)
                 {
-                    double cap = settings.Stage1CapKm(LiftMode.New, body.hasAtmosphere ? body.atmosphereDepth / 1000 : 0);
+                    double cap = CapKm();
                     // stage 1's margin: Δv it still had when its burn reached the cap
-                    double unused = have_cut && s1BurnDv >= 0 ? Math.Max(0, 0.97 * Stage1LeftDv(model, cut_obs.mass) - s1BurnDv) : 0;
+                    double unused = have_cut && s1BurnDv >= 0 ? Math.Max(0, Stage1LeftDv(model, cut_obs.mass) - K2D2.Lift.Stage1Burn.ReserveDv - s1BurnDv) : 0;
                     double real = BehaviourTrainer.RealScore(ok, sepPe, cap, drift_peak_deg, max_q_so_far, ctx, unused);
+                    rec.realScore = real;
+                    rec.capKm = cap;
+                    if (!double.IsNaN(check.debrisPeKm)) rec.plannedPeKm = check.debrisPeKm;
                     // the burn's real loss: what was burned against an instant burn from the cut-off orbit
                     // to the orbit stage 1 was dropped on
                     if (!double.IsNaN(sepPe) && have_cut && s1BurnDv > 0 && cut_obs.peR > 0)
@@ -600,7 +546,7 @@ namespace K2D2.Lift.Next
                 if (!double.IsNaN(sepPe))
                     logger.LogInfo($"[Next] SEPARATION stage 1 dropped at Ap {sepAp:n1} Pe {sepPe:n1} km - planned Pe " +
                                    (check != null && !double.IsNaN(check.debrisPeKm) ? $"{check.debrisPeKm:n0} km ({sepPe - check.debrisPeKm:+0;-0} km)" : "-") +
-                                   $" (target Ap {settings.destination_Ap_km.V:n0} km, debris cap {settings.Stage1CapKm(LiftMode.New, body.hasAtmosphere ? body.atmosphereDepth / 1000 : 0):n0} km)");
+                                   $" (target Ap {settings.destination_Ap_km.V:n0} km, debris cap {CapKm():n0} km)");
                 if (model != null && model.valid)
                     CraftMemory.Learn(model, vessel.Name, learn_onset_mach, learn_onset_q, learn_onset_thrust, learn_onset_peak,
                                       state.Contains("Lost control"), loc_mach, loc_q, loc_thrust, loc_alt / 1000, max_mach, ok);
@@ -619,6 +565,8 @@ namespace K2D2.Lift.Next
                     double spare = s1_burned ? upper - circDv : s1_left + upper - circDv;
                     bool p = check != null && check.verdict != LaunchCheck.Verdict.Unknown;
                     double N = double.NaN;
+                    rec.spareDv = spare;
+                    if (p) rec.plannedSpareDv = check.spareDv;
                     logger.LogInfo("[Next] PREDICTED -> ACTUAL at cut-off: " +
                                    $"T+ {Delta(p ? check.cutT : N, c.ut - launch_ut, " s")}, " +
                                    $"alt {Delta(p ? check.altKm : N, c.altitude / 1000, " km", "n1")}, " +
@@ -638,6 +586,9 @@ namespace K2D2.Lift.Next
                 }
                 else
                     logger.LogInfo("[Next] PREDICTED -> ACTUAL: the run stopped before cut-off");
+                // pad launches only (check is null for a mid-air start)
+                if (check != null && model != null && model.valid)
+                    CraftMemory.RecordFlight(model, vessel.Name, rec);
 
                 foreach (var v in AllVessels())
                 {
@@ -848,27 +799,26 @@ namespace K2D2.Lift.Next
             var rep = shield.report;
             logger.LogInfo($"[Next] T+{(launch_ut < 0 ? 0 : obs.ut - launch_ut):n1} {arbiter.behaviour} ({policy.Name}) " +
                            $"alt {obs.altitude / 1000:n2} km, v {obs.airSpeed:n0} m/s, M {obs.mach:n2}, q {obs.qKPa:n1} kPa, " +
-                           $"heat {obs.heat / K2D2.Lift.Stage1.Stage1Optimiser.HeatLimit * 100:n0}%, " +
+                           $"heat {obs.heat / K2D2.Lift.Stage1.Stage1Sim.HeatLimit * 100:n0}%, " +
                            $"path {obs.pathDeg:n1}, nose {obs.noseDeg:n1}, policy {policy_cmd.elevationDeg:n1}°/{policy_cmd.throttle:n2}, " +
                            $"out {latched.elevationDeg:n1}°/{latched.throttle:n2}, hdg+{heading_correction:n1}, " +
                            $"Ap {obs.ApKm(body.radius):n1} Pe {obs.PeKm(body.radius):n1} km, mass {obs.mass:n2} t, " +
                            $"thrust {obs.thrustKN:n0} kN, shield {rep.Flags()}, tick {ticks} | " +
-                           (ctx.blend ? $"{behaviour_policy.WeightsText()}, accel {obs.speedRate:n1} m/s² | " : "") +
+                           $"{behaviour_policy.WeightsText()}, accel {obs.speedRate:n1} m/s² | " +
                            $"slip {obs.sideslipDeg:+0.0;-0.0}°, track {obs.trackOffDeg:+0.0;-0.0}°, nose hdg {obs.noseHdgOffDeg:+0.0;-0.0}°, " +
                            $"roll {obs.rollRateDegS:+0.0;-0.0}°/s, ctl p {obs.ctlPitch:+0.00;-0.00} y {obs.ctlYaw:+0.00;-0.00} r {obs.ctlRoll:+0.00;-0.00}");
         }
 
         public override void updateUI(VisualElement root_el, FullStatus st)
         {
-            st.Console($"New system (Phase 0): {status}");
+            st.Console($"Lift: {status}");
         }
 
         public override void UpdateInfoRows(System.Action<string, string> addRow)
         {
             addRow("Behaviour", $"{arbiter.behaviour}");
             addRow("Launch check", check == null ? "-" : check.Short());
-            addRow("Kick", ctx.blend ? "- (behaviour model)" : $"{ctx.kickDeg:n1}° at {(ctx.kickSpeed > 0 ? ctx.kickSpeed : GravityTurnPolicy.DefaultKickSpeed):n0} m/s" +
-                           (ctx.holdTwr > 0 ? $", TWR ≤ {ctx.holdTwr:n1} to {ctx.holdKm:n0} km" : ""));
+            addRow("Weights", behaviour_policy.WeightsText());
             addRow("Policy", policy?.Name ?? "-");
             addRow("Altitude", $"{obs.altitude / 1000:n2} km");
             addRow("Apoapsis Alt.", $"{obs.ApKm(body.radius):n2} km");
@@ -877,7 +827,7 @@ namespace K2D2.Lift.Next
             addRow("Command (policy)", $"{policy_cmd.elevationDeg:n1}° / {policy_cmd.throttle:n2}");
             addRow("Command (out)", $"{latched.elevationDeg:n1}° / {latched.throttle:n2}");
             addRow("q / Mach", $"{obs.qKPa:n1} kPa / {obs.mach:n2}");
-            addRow("Heating", $"{obs.heat / K2D2.Lift.Stage1.Stage1Optimiser.HeatLimit * 100:n0}%");
+            addRow("Heating", $"{obs.heat / K2D2.Lift.Stage1.Stage1Sim.HeatLimit * 100:n0}%");
             addRow("Shield", shield.report.Flags());
             addRow("Loop", measured_rate_hz > 0 ? $"{measured_rate_hz:n1} Hz, {ticks} ticks" : $"{ticks} ticks");
         }

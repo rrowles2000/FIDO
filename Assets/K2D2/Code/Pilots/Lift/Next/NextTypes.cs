@@ -103,27 +103,16 @@ namespace K2D2.Lift.Next
     public struct ShieldReport
     {
         public bool rejected;        // the command was NaN/infinite - the last good one was kept
-        public bool aoaLimited;      // the nose was held near the airflow
         public bool rateLimited;     // the pitch smoother slowed the change
-        public float bucket;         // max-Q throttle factor (1 = not throttled back)
-        public bool bucketSuspended; // nose off its command - full thrust for control instead
         public bool lossOfControl;   // nose more than 30° off the airflow in thick air
         public bool headingLimited;  // heading correction held back (rate or sideways AoA)
-        public double clampedSeconds; // how long the AoA limit has moved the command by more than 2°
-        public bool qCapped;         // the learned transonic q cap is in force
-        public bool protect;         // drift protection on
 
         public string Flags()
         {
             var f = "";
             if (rejected) f += "REJECT ";
-            if (aoaLimited) f += "AoA ";
             if (rateLimited) f += "RATE ";
-            if (bucket < 0.999f) f += $"Q×{bucket:n2} ";
-            if (bucketSuspended) f += "Q-SUSP ";
             if (headingLimited) f += "HDG ";
-            if (qCapped) f += "QCAP ";
-            if (protect) f += "PROT ";
             if (lossOfControl) f += "LOC ";
             return f.Length == 0 ? "-" : f.TrimEnd();
         }

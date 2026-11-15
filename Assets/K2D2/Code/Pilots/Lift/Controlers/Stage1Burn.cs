@@ -43,8 +43,11 @@ namespace K2D2.Lift
         // set when the run ends needing the player (the upper engine wouldn't light safely)
         public string problem;
 
-        // Never ask stage 1 for all of its Δv: if it ran dry mid-burn the burn would never finish.
-        const double UsableFraction = 0.97;
+        // Small margin under stage 1's modelled Δv. It was 3% (~36 m/s) so a dry stage couldn't
+        // leave the burn hanging, but on 2026-11-14 (83 t) that left the node 22 m/s short of the
+        // 55 km cap - Pe 34 km on every flight, the reserve carried down unused. Running dry is now
+        // handled by the burn itself (BurnManeuver.end_on_flameout), so only model error is covered.
+        public const double ReserveDv = 5;
         const double SettleSeconds = 2;
         const double SeparationGap = 4;  // s from stage-1 cut-off to upper ignition
         const double MinLead = 8;        // s to turn onto the node
@@ -63,6 +66,7 @@ namespace K2D2.Lift
             this.lift = lift;
             this.lift_settings = lift_settings;
             sub_contollers.Add(current_executor);
+            burn.end_on_flameout = true;
         }
 
         public override void Start()
@@ -73,9 +77,9 @@ namespace K2D2.Lift
             node = null;
             var vessel = current_vessel?.VesselComponent;
             separator = Stage1Model.FindMarkedSeparator(vessel);
-            if (!lift_settings.Stage1BurnOn(lift.mode) || vessel == null || separator == null)
+            if (!lift_settings.next_s1_ap_burn.V || vessel == null || separator == null)
             {
-                if (lift.mode == LiftMode.New && lift_settings.next_s1_ap_burn.V && vessel != null && separator == null)
+                if (lift_settings.next_s1_ap_burn.V && vessel != null && separator == null)
                     logger.LogWarning("[Stage1Burn] no stage-1 separator marked (StageGroup) - skipping the stage-1 apoapsis burn");
                 finished = true;
                 return;
@@ -110,7 +114,7 @@ namespace K2D2.Lift
             double period = LandingTargeting.OrbitalPeriodFromStateVectors(r_now, v_now, body.gravParameter);
             double burn_UT = now + LandingTargeting.TimeToNextApoapsis(r_now, v_now, body.gravParameter, period);
 
-            double cap_km = lift_settings.Stage1CapKm(lift.mode, body.hasAtmosphere ? body.atmosphereDepth / 1000 : 0);
+            double cap_km = lift_settings.Stage1CapKm(body.hasAtmosphere ? body.atmosphereDepth / 1000 : 0);
             double capR = System.Math.Min(body.radius + cap_km * 1000.0, apR);
             double v_ap = VisVivaEquation.CalculateVelocity(apR, apR, peR, body.gravParameter);
             double v_cap = VisVivaEquation.CalculateVelocity(apR, apR, capR, body.gravParameter);
@@ -127,7 +131,7 @@ namespace K2D2.Lift
                 upper = model.upperPhases[0];
                 dv_avail = m > last.endMass ? last.ispVac * 9.80665 * System.Math.Log(m / last.endMass) : 0;
             }
-            double dv = System.Math.Min(dv_cap, UsableFraction * dv_avail);
+            double dv = System.Math.Min(dv_cap, System.Math.Max(0, dv_avail - ReserveDv));
 
             // Centre the whole apoapsis burn - stage 1 plus whatever the upper stage still has to
             // add to circularise - on apoapsis. BurnManeuver ignites AT the node time, so on

@@ -47,6 +47,22 @@ namespace K2D2.Lift.Next
             public double thrustKN;      // at the onset - authority = thrust / q
         }
 
+        /// <summary>
+        /// One pad launch as the Training tab charts it (2026-11-15): the real score against the
+        /// trained sim's prediction, Pe at separation against the plan, spare Δv against the plan,
+        /// and how well the calibration fitted the flight. NaN where a value wasn't measured.
+        /// </summary>
+        public class FlightRecord
+        {
+            public string when;
+            public bool ok;
+            public double realScore = double.NaN, simScore = double.NaN;
+            public double sepPeKm = double.NaN, plannedPeKm = double.NaN, capKm = double.NaN;
+            public double spareDv = double.NaN, plannedSpareDv = double.NaN;
+            public double driftDeg = double.NaN, maxQKPa = double.NaN;
+            public double calRmsBefore = double.NaN, calRmsAfter = double.NaN;
+        }
+
         public class Record
         {
             public string key, name;
@@ -58,19 +74,19 @@ namespace K2D2.Lift.Next
             public double calDrag = 1, calThrust = 1, calAoA = 0, calAoAGain = 1, calTrim = 0;
             public double calS1Loss;          // stage-1 apoapsis burn loss, m/s (LearnS1BurnLoss)
             public int s1LossFlights;
-            public double qHold;              // learned max-Q hold point (share of max Q), 0 = default
             public int calFlights;
             public bool fragile;              // has drifted outside the kick
             public double capKPa;             // superseded 2026-11-14 (a throttle q cap cut steering authority); ignored
             public double capMachLo, capMachHi;
             public string capReason = "";
             public List<Event> events = new();
-            // every pad launch flown with its measured outcome - what PlanLearner learns from
-            public List<PlanLearner.Obs> plans = new();
+            // (PlanLearner's "plans" and the max-Q "qHold" were dropped 2026-11-15 with the
+            // pre-behaviour-model path; older files still load - unknown fields are skipped)
             // behaviour model: the weights training settled on, its simulated score, and the real flights' scores
             public BehaviourWeights? weights;
             public double simScore;
             public List<double> realScores = new();
+            public List<FlightRecord> history = new(); // every pad launch since 2026-11-15, for the Training chart
         }
 
         static Dictionary<string, Record> records;
@@ -153,8 +169,6 @@ namespace K2D2.Lift.Next
         {
             var r = Get(model);
             if (r == null) return;
-            if (r.qHold > 0) ctx.qHoldFraction = r.qHold;
-            if (r.minThrustPerQ > 0) ctx.minThrustPerQ = r.minThrustPerQ;
             if (r.fragile)
             {
                 ctx.fragile = true;
@@ -184,29 +198,7 @@ namespace K2D2.Lift.Next
                                                  source = "average of calibrated designs" };
         }
 
-        /// <summary>
-        /// Learn the max-Q hold point: the shield holds q at a share of max Q, and the real peak
-        /// lands a little above it. Aim the real peak at 90% of max Q (the planning margin): move
-        /// the hold by 70% of the miss each flight that actually used the limiter. The fixed 84%
-        /// was a guess at the overshoot (2026-11-14).
-        /// </summary>
-        public static void LearnQHold(Stage1Model model, string name, double peakQ, double maxQ, double holdUsed, bool engaged)
-        {
-            if (!engaged || peakQ <= 0 || maxQ <= 0) return;
-            string key = Key(model);
-            if (key == null) return;
-            var all = All();
-            var r = Get(model);
-            if (r == null) all[key] = r = new Record { key = key, name = name, s1MassT = model.phases[0].startMass, s1ThrustKN = model.phases[0].thrustVac,
-                                                       finsAhead = model.finsAhead, finsBehind = model.finsBehind };
-            double target = LaunchCheck.LimitMargin * maxQ;
-            double next = holdUsed * (1 + 0.7 * (target / peakQ - 1));
-            r.qHold = Math.Max(0.75, Math.Min(0.92, next));
-            Save();
-            logger.LogInfo($"[Memory] {key}: max-Q hold {holdUsed:p0} gave a peak of {peakQ:n1} kPa ({peakQ / maxQ:p0} of max Q, aiming at {LaunchCheck.LimitMargin:p0}) -> hold {r.qHold:p1} next time");
-        }
-
-        public static void SaveCalibration(Stage1Model model, string name, LaunchCheck.Calibration c)
+                public static void SaveCalibration(Stage1Model model, string name, LaunchCheck.Calibration c)
         {
             string key = Key(model);
             if (key == null) return;
@@ -265,6 +257,16 @@ namespace K2D2.Lift.Next
             Save();
         }
 
+        public static void RecordFlight(Stage1Model model, string name, FlightRecord f)
+        {
+            var r = GetOrAdd(model, name);
+            if (r == null || f == null) return;
+            r.history ??= new List<FlightRecord>();
+            r.history.Add(f);
+            if (r.history.Count > 200) r.history.RemoveRange(0, r.history.Count - 200);
+            Save();
+        }
+
         /// <summary>For the Training tab: the behaviour model's training state for this design.</summary>
         public static string DescribeTraining(Stage1Model model)
         {
@@ -276,28 +278,12 @@ namespace K2D2.Lift.Next
             return $"sim score {r.simScore:n1}; {rs} (score = Pe at stage-1 separation, km, minus penalties)";
         }
 
-        /// <summary>The measured plan outcomes for this design (empty if none).</summary>
-        public static List<PlanLearner.Obs> PlanResults(Stage1Model model) => Get(model)?.plans ?? new List<PlanLearner.Obs>();
-
-        public static void AddPlanResult(Stage1Model model, string name, PlanLearner.Obs obs)
-        {
-            string key = Key(model);
-            if (key == null) return;
-            var all = All();
-            var r = Get(model);
-            if (r == null) all[key] = r = new Record { key = key, name = name, s1MassT = model.phases[0].startMass, s1ThrustKN = model.phases[0].thrustVac,
-                                                       finsAhead = model.finsAhead, finsBehind = model.finsBehind };
-            r.plans ??= new List<PlanLearner.Obs>();
-            r.plans.Add(obs);
-            Save();
-        }
-
-        public static string Describe(Stage1Model model)
+                public static string Describe(Stage1Model model)
         {
             var r = Get(model);
             if (r == null) return "new design";
             if (!r.fragile && r.minThrustPerQ <= 0) return $"{r.flights} flight(s), no limit learned";
-            return $"FRAGILE: keep thrust/q ≥ {r.minThrustPerQ:n0} kN/kPa, Q·AoA ≤ {FragileQAlpha:n0}, no throttle holds ({r.capReason}; {r.flights} flight(s))";
+            return $"FRAGILE: heading correction Q·AoA ≤ {FragileQAlpha:n0}, drifted at thrust/q {r.minThrustPerQ / AuthorityMargin:n0} kN/kPa ({r.capReason}; {r.flights} flight(s))";
         }
 
         /// <summary>

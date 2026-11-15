@@ -25,32 +25,24 @@ namespace K2D2.Lift
 
         internal  LiftSettings settings;
 
-        internal  LiftAscentPath ascent_path = null;
-
         KSPVessel current_vessel;
 
         Vector3d direction = Vector3d.zero;
 
-        // One pipeline (status -> sub pilot) per lift system, see LiftSettings.LiftMode. A status a
-        // system has no entry for is skipped (Classic and New have no Stage1Burn).
-        readonly System.Collections.Generic.Dictionary<LiftMode, System.Collections.Generic.Dictionary<LiftStatus, ExecuteController>> pipelines = new();
-        readonly System.Collections.Generic.Dictionary<LiftMode, AscentBase> ascents = new();
+        // status -> sub pilot. Until 2026-11-15 there was one pipeline per lift system (Classic,
+        // Optimiser, New); only the New system is left (the others: Archive/lift-legacy-2026-11-15/).
+        readonly System.Collections.Generic.Dictionary<LiftStatus, ExecuteController> pipeline = new();
 
         Stage1Burn stage1_burn = null;
+        Next.AscentNext ascent_next = null;
 
-        // the system flying the current run; fixed at start so switching the selector mid-flight
-        // can't swap controllers under the vessel
-        LiftMode active_mode;
-        internal LiftMode mode => isRunning ? active_mode : settings.mode.V;
-
-        internal AscentBase ascent => ascents[mode];
+        internal AscentBase ascent => ascent_next;
 
         public ExecuteController current_subpilot = null;
 
         public LiftPilot()
         {
             settings = new LiftSettings();
-            ascent_path = new LiftAscentPath(settings);
             _page = new LiftUI(this);
 
             current_vessel = K2D2_Plugin.Instance.current_vessel;
@@ -66,51 +58,20 @@ namespace K2D2.Lift
 
         void BuildPipelines()
         {
-            // Classic - the original K2-D2 ascent (Classic/), unchanged
-            var classic_ascent = new Classic.AscentClassic(settings, ascent_path);
-            ascents[LiftMode.Classic] = classic_ascent;
-            pipelines[LiftMode.Classic] = new()
-            {
-                [LiftStatus.Ascent] = classic_ascent,
-                [LiftStatus.Coasting] = new Classic.CoastingClassic(this, settings),
-                [LiftStatus.Adjust] = new Adjust(settings, classic_ascent),
-                [LiftStatus.Circularize] = new Classic.FinalCircularizeClassic(this, settings),
-            };
-
-            // Optimiser - our system (Controlers/ + Stage1/)
-            var ascent_opt = new Ascent(settings, ascent_path);
+            // ascent (Next/) -> coast out of the atmosphere -> stage 1's leftover burned at apoapsis,
+            // then separation (LiftSettings.next_s1_ap_burn) -> trim Ap -> closed-loop circularise
+            ascent_next = new Next.AscentNext(this, settings);
             stage1_burn = new Stage1Burn(this, settings);
-            ascents[LiftMode.Optimiser] = ascent_opt;
-            pipelines[LiftMode.Optimiser] = new()
-            {
-                [LiftStatus.Ascent] = ascent_opt,
-                [LiftStatus.Coasting] = new Coasting(this, settings),
-                [LiftStatus.Stage1Burn] = stage1_burn,
-                [LiftStatus.Adjust] = new Adjust(settings, ascent_opt),
-                [LiftStatus.Circularize] = new FinalCircularize(this, settings),
-            };
-
-            // New - the third system, being developed in Next/ (Phase 0: layered loop flown with
-            // the Optimiser's guidance as its policy). It hands over to the Classic coast - which,
-            // unlike ours, ignores the stage-1 disposal flag the New system doesn't use - and to
-            // our FinalCircularize, which has the past-apoapsis fix.
-            var ascent_next = new Next.AscentNext(this, settings);
-            ascents[LiftMode.New] = ascent_next;
-            pipelines[LiftMode.New] = new()
-            {
-                [LiftStatus.Ascent] = ascent_next,
-                [LiftStatus.Coasting] = new Classic.CoastingClassic(this, settings),
-                // stage 1's leftover burned at apoapsis, then separation (LiftSettings.next_s1_ap_burn)
-                [LiftStatus.Stage1Burn] = new Stage1Burn(this, settings),
-                [LiftStatus.Adjust] = new Adjust(settings, ascent_next),
-                [LiftStatus.Circularize] = new FinalCircularize(this, settings),
-            };
+            pipeline[LiftStatus.Ascent] = ascent_next;
+            pipeline[LiftStatus.Coasting] = new Coasting(this, settings);
+            pipeline[LiftStatus.Stage1Burn] = stage1_burn;
+            pipeline[LiftStatus.Adjust] = new Adjust(settings, ascent_next);
+            pipeline[LiftStatus.Circularize] = new FinalCircularize(this, settings);
         }
 
-        // first status at or after `from` that the active system has a sub pilot for (Off if none)
+        // first status at or after `from` that has a sub pilot (Off if none)
         LiftStatus FirstAvailable(LiftStatus from)
         {
-            var pipeline = pipelines[active_mode];
             for (var s = from; s != LiftStatus.Off; s = s.Next())
                 if (pipeline.ContainsKey(s))
                     return s;
@@ -131,12 +92,12 @@ namespace K2D2.Lift
                 if (_status == value)
                     return;
                 _status = value;
+                logger.LogInfo($"[Lift] status {value}");
                 switch (value)
                 {
                     case LiftStatus.Off:
                     {
-                        if (active_mode == LiftMode.New && ascents.TryGetValue(LiftMode.New, out var next_ascent))
-                            (next_ascent as Next.AscentNext)?.LogFlightResult(result_ok, end_status, last_circ_dv, last_s1_burn_dv, last_s1_sep_ap, last_s1_sep_pe);
+                        ascent_next?.LogFlightResult(result_ok, end_status, last_circ_dv, last_s1_burn_dv, last_s1_sep_ap, last_s1_sep_pe);
                         // stop
                         if (current_vessel != null)
                         {
@@ -152,7 +113,7 @@ namespace K2D2.Lift
                     }
                         break;
                     default:
-                        pipelines[active_mode].TryGetValue(value, out current_subpilot);
+                        pipeline.TryGetValue(value, out current_subpilot);
                         break;
                 }
 
@@ -195,14 +156,13 @@ namespace K2D2.Lift
         {
             result_ok = false;
             end_status = "";
-            active_mode = settings.mode.V;
             last_circ_dv = 0;
             last_s1_burn_dv = -1;
             last_s1_sep_ap = last_s1_sep_pe = double.NaN;
-            logger.LogInfo($"[Lift] starting with the {active_mode} lift system");
+            logger.LogInfo($"[Lift] starting at {start_status}");
             var first = FirstAvailable(start_status);
             if (first == LiftStatus.Off)
-                end_status = $"The {active_mode} lift system has no {start_status} step";
+                end_status = $"The lift pilot has no {start_status} step";
             status = first;
         }
 
@@ -245,6 +205,30 @@ namespace K2D2.Lift
 
         public WarpTo warp_to = new WarpTo();
 
+        // [Lift] TLM once a second (real time) after the ascent has handed over, for the live view
+        // (tools/liveview): the ascent logs its own [Next] T+ line, the coast logged nothing at all.
+        float next_tlm;
+
+        void LogTelemetry()
+        {
+            if (status == LiftStatus.Ascent || UnityEngine.Time.unscaledTime < next_tlm) return;
+            next_tlm = UnityEngine.Time.unscaledTime + 1f;
+            try
+            {
+                var v = current_vessel?.VesselComponent;
+                var o = v?.Orbit;
+                if (o == null) return;
+                double R = o.referenceBody.radius;
+                double launch = ascent_next?.LaunchUT ?? -1;
+                double t = launch >= 0 ? GeneralTools.Current_UT - launch : 0;
+                double speed = v.OrbitalSpeed;
+                logger.LogInfo($"[Lift] TLM T+{t:0.0} {status} alt {v.AltitudeFromSeaLevel / 1000:0.00} km, v {speed:0} m/s orbital, " +
+                               $"Ap {(o.Apoapsis - R) / 1000:0.0} Pe {(o.Periapsis - R) / 1000:0.0} km, mass {v.totalMass:0.00} t, " +
+                               $"throttle {current_vessel.GetThrottle():0.00}, warp {TimeWarpTools.CurrentRateIndex}");
+            }
+            catch (System.Exception) { }
+        }
+
 
         public void NextMode()
         {
@@ -269,6 +253,8 @@ namespace K2D2.Lift
 
             if (!isRunning)
                 return;
+
+            LogTelemetry();
 
             var subpilot = current_subpilot;
             if (subpilot != null)

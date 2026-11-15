@@ -5,7 +5,7 @@ namespace K2D2.Lift.Next
     {
         Ignite,     // on the pad, engines not lit yet
         ClearTower, // straight up until clear of the pad
-        Fly,        // the policy (Phase 0: GuidancePolicy, later the network)
+        Fly,        // the policy (the behaviour model, later the network)
         CutOff,     // apoapsis at the target - engines off, hand over to Coasting
         BurntOut,   // stage 1 gave out before the target apoapsis
         Abort,      // stop the run

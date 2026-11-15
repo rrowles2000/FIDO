@@ -100,8 +100,8 @@ namespace K2D2.Lift
             wanted_throttle = remaining_Ap / delta_ap_per_second;
             // wanted_throttle = wanted_throttle / 2;
 
-            if (wanted_throttle > lift_settings.max_throttle.V)
-                wanted_throttle = lift_settings.max_throttle.V;
+            if (wanted_throttle > lift_settings.next_max_throttle.V)
+                wanted_throttle = lift_settings.next_max_throttle.V;
 
             current_vessel.SetThrottle(wanted_throttle);
         }

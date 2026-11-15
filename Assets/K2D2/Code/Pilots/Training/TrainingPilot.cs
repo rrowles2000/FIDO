@@ -56,9 +56,6 @@ namespace K2D2.Training
 
         // ================================================================ start / stop
 
-        /// <summary>The next flight explores (PlanLearner): every training flight but the last, which flies the best estimate.</summary>
-        public bool ExploreNext => isRunning && done < target - 1;
-
         public string StartProblem()
         {
             var vessel = Vessel;
@@ -116,7 +113,6 @@ namespace K2D2.Training
             var vessel = Vessel;
             vessel_id = vessel.SimulationObject.GlobalId;
             var s = Lift.settings;
-            s.mode.V = LiftMode.New;          // the system that learns
             s.auto_circularize.V = true;      // a flight ends once the orbit is circular
             SetStatus($"Flight {done + 1} of {target}: launching", true);
             logger.LogInfo($"[Training] flight {done + 1}/{target}: launch");

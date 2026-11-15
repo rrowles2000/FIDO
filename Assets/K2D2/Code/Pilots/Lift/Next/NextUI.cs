@@ -5,9 +5,8 @@ using UnityEngine.UIElements;
 namespace K2D2.Lift.Next
 {
     /// <summary>
-    /// "NEW SYSTEM" foldout on the Lift tab, shown only with the New lift system selected: the
-    /// shield limits, the pitch kick and the launch check. Built in code (the bundle's Lift.uxml has
-    /// no slot for it), same approach as Stage1UI.
+    /// "LIFT SYSTEM" foldout on the Lift tab: the launch check and the overrides. Built in code (the
+    /// bundle's Lift.uxml has no slot for it).
     /// </summary>
     public class NextUI
     {
@@ -19,14 +18,14 @@ namespace K2D2.Lift.Next
 
         public void Build(VisualElement parent, int index)
         {
-            section = new Foldout { text = "NEW SYSTEM", value = true };
+            section = new Foldout { text = "LIFT SYSTEM", value = true };
             if (index >= 0 && index <= parent.childCount) parent.Insert(index, section);
             else parent.Add(section);
 
             // Everything is automatic now; the settings are overrides kept for calibration flights
             // (2026-11-13: aiming at a fully automated system - see `ksplog dataset` for the
             // evidence each one needs before it can go).
-            Hint(section, "Automatic: the launch check picks the kick angle, kick speed and throttle hold for this vessel; " +
+            Hint(section, "Automatic: the behaviour model is trained for this vessel in the calibrated simulator on the pad, " +
                           "stage 1's leftover is burned at apoapsis and dropped on a re-entry orbit. Check below to see its plan.");
 
             var button = new Button(CheckNow) { text = "Check launch" };
@@ -38,10 +37,6 @@ namespace K2D2.Lift.Next
             section.Add(o);
             Hint(o, "Leave these at their defaults unless a test needs them.");
 
-            var blend = new K2Toggle("Behaviour model (3 weighted behaviours - off = the old kick / plan-grid system)");
-            blend.Bind(settings.next_behaviour_model);
-            o.Add(blend);
-
             var max_thr = new FloatField("Max throttle (0.1-1)") { isDelayed = true };
             max_thr.Bind(settings.next_max_throttle);
             o.Add(max_thr);
@@ -49,23 +44,12 @@ namespace K2D2.Lift.Next
             var max_q = new FloatField("Max Q (kPa)") { isDelayed = true };
             max_q.Bind(settings.next_max_q_kpa);
             o.Add(max_q);
+            Hint(o, "Training and the flight score are penalised above it; the throttle is never cut back for it.");
 
-            var q_alpha = new FloatField("Q·AoA limit (kPa·°)") { isDelayed = true };
+            var q_alpha = new FloatField("Heading Q·AoA limit (kPa·°)") { isDelayed = true };
             q_alpha.Bind(settings.next_q_alpha);
             o.Add(q_alpha);
-            Hint(o, "Nose kept within this ÷ q degrees of the airflow. Higher lets the rocket turn harder in thick air, at more risk of flipping.");
-
-            var auto_kick = new K2Toggle("Auto kick (launch check picks angle, speed, throttle hold)");
-            auto_kick.Bind(settings.next_kick_auto);
-            o.Add(auto_kick);
-
-            var kick = new FloatField("Pitch kick (°)") { isDelayed = true };
-            kick.Bind(settings.next_kick_deg);
-            o.Add(kick);
-            var kick_speed = new FloatField("Kick start speed (m/s)") { isDelayed = true };
-            kick_speed.Bind(settings.next_kick_speed);
-            o.Add(kick_speed);
-            settings.next_kick_auto.listen(v => { kick.Show(!v); kick_speed.Show(!v); });
+            Hint(o, "The ground-track heading correction turns the nose at most this ÷ q degrees sideways off the airflow.");
 
             var s1_burn = new K2Toggle("Burn stage 1's leftover at apoapsis, then drop it");
             s1_burn.Bind(settings.next_s1_ap_burn);
@@ -81,8 +65,6 @@ namespace K2D2.Lift.Next
             refuse.Bind(settings.next_refuse_short);
             o.Add(refuse);
         }
-
-        public void SetVisible(bool v) => section?.Show(v);
 
         float last_check_time = -10;
 
@@ -100,21 +82,19 @@ namespace K2D2.Lift.Next
             CraftMemory.ApplyTo(ref ctx, model);
             var calib = CraftMemory.GetCalibration(model);
             string train = "";
-            if (ctx.blend && model != null && model.valid)
+            if (model != null && model.valid)
             {
                 var b = vessel.mainBody;
-                double cap = settings.Stage1CapKm(LiftMode.New, b.hasAtmosphere ? b.atmosphereDepth / 1000 : 0);
+                double cap = settings.Stage1CapKm(b.hasAtmosphere ? b.atmosphereDepth / 1000 : 0);
                 var o = BehaviourTrainer.TrainForLaunch(model, ref ctx, settings.heading.V, settings.destination_Ap_km.V, calib, cap, vessel.Name,
                                                         LiftPilot.Instance?.logger);
                 if (o != null) train = "\nTraining: " + o.Summary() + "\nWeights: " + o.weights;
             }
-            var r = LaunchCheck.Run(model, ctx, settings.heading.V, settings.destination_Ap_km.V,
-                                    settings.next_kick_auto.V ? (double?)null : settings.next_kick_deg.V, calib);
+            var r = LaunchCheck.Run(model, ctx, settings.heading.V, settings.destination_Ap_km.V, calib);
             result.text = r.Summary() + (vessel.Landed ? "" : " (not on the pad - simulated from here as if launching)") +
                           "\nThis design: " + CraftMemory.Describe(model) + "\nModel: " + calib + train;
             var log = LiftPilot.Instance?.logger;
             log?.LogInfo("[Next] launch check (button): " + r.Summary());
-            foreach (var line in r.Table()) log?.LogInfo("[Next]   " + line);
         }
 
         static Label Hint(VisualElement parent, string text)

@@ -14,12 +14,11 @@ using ILogger = ReduxLib.Logging.ILogger;
 
 namespace K2D2.Lift
 {
-    // Final ascent phase: circularizes the orbit at apoapsis, using the same state-vector orbital
-    // math and node/execution pipeline as precision landing's Circularize/DeorbitBurn
-    // (LandingTargeting for the orbital elements, ManeuverCreator.CreateManeuverNodeAtUT for the
-    // node, Turn/Warp/Burn for execution). Unlike Landing's Circularize, there is no "close enough,
-    // skip" or "too high, refuse" gating: Adjust's fine-tuning burn always leaves periapsis
-    // low/suborbital, so this phase always has real circularizing work to do.
+    // Final ascent phase: circularizes the orbit at apoapsis with a closed-loop burn
+    // (CircClosedLoop), planned with the same state-vector orbital math as precision landing's
+    // Circularize (LandingTargeting). The node-based burn the Classic and Optimiser systems used
+    // was removed with them on 2026-11-15 (Archive/lift-legacy-2026-11-15/). There is no "close
+    // enough, skip" gating: Adjust's trim burn always leaves periapsis low, so there is real work.
     public class FinalCircularize : ExecuteController
     {
         public ILogger logger = ReduxLib.ReduxLib.GetLogger("K2D2.Lift.FinalCircularize");
@@ -28,28 +27,16 @@ namespace K2D2.Lift
         KSPVessel current_vessel;
         LiftPilot lift;
 
-        public enum Mode { Turn, Warp, Burn }
-        public Mode mode = Mode.Turn;
-
-        TurnTo turn = new TurnTo();
         WarpTo warp = new WarpTo();
-        BurnManeuver burn = new BurnManeuver();
-        ManeuverCreator maneuver_creator = new ManeuverCreator();
 
-        public SingleExecuteController current_executor = new SingleExecuteController();
-        ManeuverNodeData node;
-
-        // seconds before the node to light the engines (half the burn, so it is centred on the
-        // node); 0 = ignite at the node, as before
+        // seconds before apoapsis to light the engines (half the burn, so it is centred on it)
         double ignite_lead_s;
-        const double LateTurnMaxDeg = 5;
 
         public FinalCircularize(LiftPilot lift, LiftSettings lift_settings)
         {
             current_vessel = K2D2_Plugin.Instance.current_vessel;
             this.lift = lift;
             this.lift_settings = lift_settings;
-            sub_contollers.Add(current_executor);
             closed_loop = new CircClosedLoop(current_vessel);
         }
 
@@ -57,8 +44,6 @@ namespace K2D2.Lift
         {
             base.Start();
             finished = false;
-            node = null;
-            closed = false;
 
             if (current_vessel == null)
             {
@@ -124,37 +109,16 @@ namespace K2D2.Lift
             lift.last_circ_dv = deltaV;
             logger.LogInfo($"[FinalCircularize] now={now:n1} apoapsis={apoapsisRadius:n0} periapsis={periapsisRadius:n0} " +
                 $"body={body.Name} period={period:n1}s time_to_apoapsis={time_to_apoapsis:n1}s | " +
-                $"burn_UT={burn_UT:n1} (T+{burn_UT - now:n1}s) deltaV={deltaV:n2}m/s burn~{t_burn:n0}s, ignition {ignite_lead_s:n0}s before the node");
+                $"burn_UT={burn_UT:n1} (T+{burn_UT - now:n1}s) deltaV={deltaV:n2}m/s burn~{t_burn:n0}s, ignition {ignite_lead_s:n0}s before apoapsis");
 
-            // New lift system: closed-loop burn (CircClosedLoop) instead of a node - a node burn
-            // aimed at one instant's plan left weak upper stages at Ap 97 / Pe 85 km
-            if (lift.mode == LiftMode.New)
-            {
-                closed = true;
-                closed_phase = ClosedPhase.Align;
-                ignite_ut = time_to_apoapsis > period / 2 ? now + lead_s : burn_UT - ignite_lead_s;
-                closed_loop.Start(FirstStageThrust(current_vessel.VesselComponent));
-                logger.LogInfo($"[FinalCircularize] closed loop: ~{deltaV:n0} m/s, burn ~{t_burn:n0} s, ignition in {ignite_ut - now:n0} s");
-                status_line = $"Circularizing (closed loop): {deltaV:n1} m/s";
-                return;
-            }
-            closed = false;
-
-            maneuver_creator.Update();
-            // Clear any existing node before adding ours - AddNodeToVessel only appends, so a
-            // player-made node or a leftover from an aborted run would otherwise leave two nodes on
-            // the plan. Uses the remove-then-create-next-frame helper (see ManeuverCreator.cs):
-            // removing and creating in the same frame can leave the new node broken.
-            status_line = $"Circularizing: {deltaV:n1} m/s";
-            maneuver_creator.RemoveAllNodesThenCreate(burn_UT, deltaV, created_node =>
-            {
-                node = created_node;
-                mode = Mode.Turn;
-                current_executor.setController(turn);
-                turn.StartManeuver(node);
-            });
+            // closed-loop burn (CircClosedLoop) rather than a node: a node burn aimed at one
+            // instant's plan left weak upper stages at Ap 97 / Pe 85 km
+            closed_phase = ClosedPhase.Align;
+            ignite_ut = time_to_apoapsis > period / 2 ? now + lead_s : burn_UT - ignite_lead_s;
+            closed_loop.Start(FirstStageThrust(current_vessel.VesselComponent));
+            logger.LogInfo($"[FinalCircularize] closed loop: ~{deltaV:n0} m/s, burn ~{t_burn:n0} s, ignition in {ignite_ut - now:n0} s");
+            status_line = $"Circularizing (closed loop): {deltaV:n1} m/s";
         }
-
         // burn time for dv across the stages that will fire, in firing order, from the game's Δv
         // data (0 if unknown). Stage 1 often still has fuel at the New system's cut-off and is
         // burned dry during this burn before the upper stage takes over (2026-11-13), so counting
@@ -182,9 +146,8 @@ namespace K2D2.Lift
             return t;
         }
 
-        // ---- closed loop (New lift system)
+        // ---- closed loop
         enum ClosedPhase { Align, Warp, Burn }
-        bool closed;
         ClosedPhase closed_phase;
         double ignite_ut;
         CircClosedLoop closed_loop;
@@ -240,59 +203,7 @@ namespace K2D2.Lift
         public override void Update()
         {
             if (finished) return;
-            if (closed) { UpdateClosed(); return; }
-            if (node == null) return;
-
-            base.Update();
-
-            // TurnTo waits for 0.5° and settled rotation; on 2026-11-13 run 2 that took ~48 s and the
-            // burn lit 10 s late, so the upper stage's burn ended up entirely after apoapsis
-            // (Ap 110 / Pe 66 km). At the ignition time, close enough is good enough: SAS keeps
-            // steering onto the node during the burn.
-            if (mode == Mode.Turn && node != null && GeneralTools.Current_UT >= node.Time - ignite_lead_s - 0.5 &&
-                turn.angle < LateTurnMaxDeg)
-            {
-                logger.LogInfo($"[FinalCircularize] ignition time reached while still lining up ({turn.angle:n1}° off) - burning, SAS keeps turning");
-                mode = Mode.Burn;
-                current_executor.setController(burn);
-                burn.StartManeuver(node);
-                burn.UT = node.Time - ignite_lead_s;
-                return;
-            }
-
-            if (!current_executor.finished)
-                return;
-
-            switch (mode)
-            {
-                case Mode.Turn:
-                    mode = Mode.Warp;
-                    current_executor.setController(warp);
-                    // Same timewarp-spam fix as DeorbitBurn/Landing's Circularize: no
-                    // check_direction flag on StartManeuver.
-                    warp.StartManeuver(node);
-                    warp.UT = node.Time - ignite_lead_s; // stop warping before the early ignition
-                    break;
-                case Mode.Warp:
-                    mode = Mode.Burn;
-                    current_executor.setController(burn);
-                    burn.StartManeuver(node);
-                    burn.UT = node.Time - ignite_lead_s; // centre the burn on the node
-                    break;
-                case Mode.Burn:
-                    status_line = "Circularize burn complete";
-                    finished = true;
-
-                    // Auto-delete the circularize node once its burn is done - nothing else needs
-                    // it, and leaving it on the plan would sit there for the rest of the flight.
-                    // Uses RemoveNode, not RemoveAllNodes: this is the only node FinalCircularize
-                    // ever creates.
-                    maneuver_creator.Update();
-                    maneuver_creator.RemoveNode(node);
-
-                    lift.EndLiftPilot(true, "Circularized - ascent complete");
-                    break;
-            }
+            UpdateClosed();
         }
 
         public override void updateUI(VisualElement root_el, FullStatus st)

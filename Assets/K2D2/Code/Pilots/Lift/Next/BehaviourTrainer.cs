@@ -114,7 +114,6 @@ namespace K2D2.Lift.Next
             LaunchCheck.Result Fly(BehaviourWeights w)
             {
                 var c = ctx;
-                c.blend = true;
                 c.weights = w;
                 sims++;
                 return LaunchCheck.Simulate(model, c, headingDeg, targetApKm, calibration);

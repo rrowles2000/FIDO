@@ -22,7 +22,7 @@ namespace K2D2.Lift.Next
     /// every time it recalculates the assembly's Δv - after any edit, including StageGroup's
     /// regroup - so the check reruns on each one (at most once a second). Planet: the home world,
     /// launching from the equator (the VAB doesn't know the launch site). Lift settings: target Ap,
-    /// heading, max throttle, and the New system's limits and kick.
+    /// heading, max throttle and the New system's limits; weights untrained (the pad check trains).
     ///
     /// StageGroup is found by reflection (Module_StageOneSeparator.MarkedSeparatorPart / SetAdvice),
     /// so neither mod needs the other installed.
@@ -114,15 +114,12 @@ namespace K2D2.Lift.Next
             model?.SetSurfaces(stability);
             var ctx = PolicyContext.From(settings);
             CraftMemory.ApplyTo(ref ctx, model);
-            var r = LaunchCheck.Run(model, ctx, settings.heading.V, settings.destination_Ap_km.V,
-                                    settings.next_kick_auto.V ? (double?)null : settings.next_kick_deg.V, CraftMemory.GetCalibration(model));
+            var r = LaunchCheck.Run(model, ctx, settings.heading.V, settings.destination_Ap_km.V, CraftMemory.GetCalibration(model));
             var memory = CraftMemory.Get(model);
             detail = $"{r.Summary()} | {stability.Summary()} | memory {CraftMemory.Key(model)}: {CraftMemory.Describe(model)} | game first-stage TWR ASL {GameFirstStageTwr(dv):n2}, " +
                      $"{dv.StageInfo?.Count ?? 0} Δv stages, separator activation stage {model.separatorStage}";
             good = r.verdict != LaunchCheck.Verdict.Unknown;
-            string learned = memory != null && memory.fragile
-                ? $" · FRAGILE design: needs thrust/q ≥ {memory.minThrustPerQ:n0}, plan gives {r.minThrustPerQ:n0}" + (r.authorityShort ? " - WON'T FLY: add thrust or move fins aft" : "")
-                : "";
+            string learned = memory != null && memory.fragile ? " · FRAGILE design (has drifted before)" : "";
             return good ? r.Short() + " · " + stability.Short() + learned : r.problem;
         }
 

@@ -69,10 +69,10 @@ namespace K2D2.Mission
             s.destination_Ap_km.V = Mathf.RoundToInt(step.GetFloat("ap_km"));
             s.polar_inclination.V = step.GetFloat("inclination");
             s.polar_south.V = step.GetBool("south");
-            // the Launch step is built around the Optimiser lift system (stage-1 disposal)
-            s.mode.V = LiftMode.Optimiser;
-            s.disposal_enabled.V = step.GetBool("optimiser");
-            s.disposal_pe_km.V = step.GetFloat("pe_cap_km");
+            // the step's "optimiser" / "pe_cap_km" (names kept so saved plans load) were the
+            // Optimiser's stage-1 disposal until 2026-11-15; now the lift system's stage-1 apoapsis burn
+            s.next_s1_ap_burn.V = step.GetBool("optimiser");
+            s.next_s1_pe_km.V = step.GetFloat("pe_cap_km");
             s.auto_circularize.V = true;
             s.coasting_warp.V = true;
 
@@ -92,13 +92,13 @@ namespace K2D2.Mission
             var vessel = Vessel?.VesselComponent;
             if (vessel == null) return "No vessel";
             if (step.GetBool("optimiser") && Stage1Model.FindMarkedSeparator(vessel) == null)
-                return "Stage 1 optimiser is on but no separator is marked 'Stage 1 separator' - mark one in the VAB or turn the optimiser off";
+                return "Stage-1 disposal is on but no separator is marked 'Stage 1 separator' - mark one in the VAB or turn disposal off";
             return null;
         }
 
         public override void Start()
         {
-            started_disposal = Lift.settings.disposal_enabled.V;
+            started_disposal = Lift.settings.next_s1_ap_burn.V;
             Lift.StartAt(LiftPilot.LiftStatus.Ascent);
         }
 
@@ -142,7 +142,6 @@ namespace K2D2.Mission
 
         public override void Prepare()
         {
-            Lift.settings.mode.V = LiftMode.Optimiser;
             Lift.settings.auto_circularize.V = true;
         }
 

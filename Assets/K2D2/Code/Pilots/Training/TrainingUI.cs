@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using K2D2.Constellation;
 using K2D2.Lift.Next;
 using K2D2.Lift.Stage1;
@@ -23,6 +24,8 @@ namespace K2D2.Training
             this.pilot = pilot;
             code = Code;
         }
+
+        public const string LiveViewUrl = "http://localhost:8642/";
 
         public static TabPage CreateTabPage() => new TabPage { name = Code, label = "Training" };
 
@@ -74,10 +77,21 @@ namespace K2D2.Training
             };
             page.Add(run_button);
 
+            // the live view: a page served outside the game by ksp2-redux/tools/liveview/liveview.py
+            // from Ksp2.log, for a second screen. The game (under Proton) can open a URL but can't
+            // reliably start a Linux program, so the server is started outside it.
+            var live = new Button(() => UnityEngine.Application.OpenURL(LiveViewUrl)) { text = "Open live view in browser" };
+            live.style.height = 24;
+            page.Add(live);
+            Hint(page).text = $"Live flight and progress page at {LiveViewUrl} - start it first with " +
+                              "python3 tools/liveview/liveview.py (in ksp2-redux).";
+
             page.Add(ConstellationUI.StatusGroup());
 
             results_label = Hint(page);
             results_label.style.marginTop = 6;
+
+            BuildProgress(page);
 
             status_bar = new FullStatus(page);
             return true;
@@ -99,6 +113,131 @@ namespace K2D2.Training
             return l;
         }
 
+        // ---------------------------------------------------------------- training progress
+
+        Foldout progress;
+        Label gains_label;
+        TrainingChart score_chart, pe_chart, spare_chart, calib_chart;
+        string shown_key;
+        int shown_count = -1;
+
+        static readonly UnityEngine.Color Real = new UnityEngine.Color(0.35f, 0.75f, 1f);
+        static readonly UnityEngine.Color Planned = new UnityEngine.Color(0.85f, 0.85f, 0.85f, 0.75f);
+        static readonly UnityEngine.Color After = new UnityEngine.Color(1f, 0.7f, 0.3f);
+
+        void BuildProgress(VisualElement page)
+        {
+            progress = new Foldout { text = "TRAINING PROGRESS", value = true };
+            progress.style.marginTop = 6;
+            page.Add(progress);
+            gains_label = Hint(progress);
+            score_chart = new TrainingChart("Score per flight (km of Pe at separation, less penalties)");
+            pe_chart = new TrainingChart("Stage-1 Pe at separation");
+            spare_chart = new TrainingChart("Upper-stage Δv to spare after circularising");
+            calib_chart = new TrainingChart("Sim vs real trajectory mismatch (calibration, lower is better)", 80);
+            progress.Add(score_chart);
+            progress.Add(pe_chart);
+            progress.Add(spare_chart);
+            progress.Add(calib_chart);
+        }
+
+        static double[] Pick(List<CraftMemory.FlightRecord> h, Func<CraftMemory.FlightRecord, double> f)
+        {
+            var a = new double[h.Count];
+            for (int i = 0; i < h.Count; i++) a[i] = f(h[i]);
+            return a;
+        }
+
+        static double FirstGood(double[] a, bool last = false)
+        {
+            for (int k = 0; k < a.Length; k++)
+            {
+                double v = a[last ? a.Length - 1 - k : k];
+                if (!double.IsNaN(v) && v > TrainingChart.FailBelow) return v;
+            }
+            return double.NaN;
+        }
+
+        static string Change(string what, double[] a, string unit, string fmt = "0.#", bool lowerIsBetter = false)
+        {
+            double first = FirstGood(a), last = FirstGood(a, true);
+            if (double.IsNaN(first)) return null;
+            if (a.Length < 2 || double.IsNaN(last)) return $"{what} {first.ToString(fmt)}{unit}";
+            double d = last - first;
+            string sign = d >= 0 ? "+" : "−";
+            bool better = lowerIsBetter ? d < 0 : d > 0;
+            return $"{what} {first.ToString(fmt)} → {last.ToString(fmt)}{unit} ({sign}{Math.Abs(d).ToString(fmt)}{(Math.Abs(d) < 1e-9 ? "" : better ? ", better" : ", worse")})";
+        }
+
+        void UpdateProgress(CraftMemory.Record r, string key)
+        {
+            var h = r?.history ?? new List<CraftMemory.FlightRecord>();
+            int n = h.Count + (r?.realScores?.Count ?? 0);
+            if (key == shown_key && n == shown_count) return;
+            shown_key = key;
+            shown_count = n;
+
+            // flights before 2026-11-15 only kept their real score: chart them as score-only points
+            int old = Math.Max(0, (r?.realScores?.Count ?? 0) - h.Count);
+            var real = new List<double>();
+            var sim = new List<double>();
+            for (int i = 0; i < old; i++) { real.Add(r.realScores[i]); sim.Add(double.NaN); }
+            foreach (var f in h) { real.Add(f.realScore); sim.Add(f.simScore); }
+
+            double cap = h.Count > 0 ? h[h.Count - 1].capKm : double.NaN;
+            score_chart.SetData(new[]
+            {
+                new TrainingChart.Series { name = "real flight", color = Real, values = real.ToArray() },
+                new TrainingChart.Series { name = "sim prediction", color = Planned, dashed = true, values = sim.ToArray() },
+            }, "", cap, double.IsNaN(cap) ? null : "debris cap");
+
+            var pe = Pick(h, f => f.sepPeKm);
+            var pe_plan = Pick(h, f => f.plannedPeKm);
+            pe_chart.SetData(new[]
+            {
+                new TrainingChart.Series { name = "actual", color = Real, values = pe },
+                new TrainingChart.Series { name = "planned", color = Planned, dashed = true, values = pe_plan },
+            }, " km", cap, double.IsNaN(cap) ? null : "cap");
+
+            var spare = Pick(h, f => f.spareDv);
+            var spare_plan = Pick(h, f => f.plannedSpareDv);
+            spare_chart.SetData(new[]
+            {
+                new TrainingChart.Series { name = "actual", color = Real, values = spare },
+                new TrainingChart.Series { name = "predicted", color = Planned, dashed = true, values = spare_plan },
+            }, "");
+
+            var rms_before = Pick(h, f => f.calRmsBefore);
+            var rms_after = Pick(h, f => f.calRmsAfter);
+            calib_chart.SetData(new[]
+            {
+                new TrainingChart.Series { name = "before refit", color = Planned, dashed = true, values = rms_before },
+                new TrainingChart.Series { name = "after refit", color = After, values = rms_after },
+            }, "");
+
+            // gains: first flight against the latest
+            var gaps = Pick(h, f => double.IsNaN(f.spareDv) || double.IsNaN(f.plannedSpareDv) ? double.NaN : Math.Abs(f.spareDv - f.plannedSpareDv));
+            var lines = new List<string>();
+            int orbit = 0;
+            foreach (var f in h) if (f.ok) orbit++;
+            lines.Add(real.Count == 0 ? "No training flights recorded for this design yet."
+                                      : $"{real.Count} flight(s)" + (h.Count > 0 ? $", {orbit} of the last {h.Count} reached orbit" : ""));
+            var realArr = real.ToArray();
+            foreach (var line in new[]
+                     {
+                         Change("Real score", realArr, ""),
+                         Change("Pe at separation", pe, " km"),
+                         Change("Spare Δv", spare, " m/s", "n0"),
+                         Change("Prediction error (spare Δv)", gaps, " m/s", "n0", lowerIsBetter: true),
+                         Change("Calibration mismatch", rms_after, "", "0.00", lowerIsBetter: true),
+                     })
+                if (line != null) lines.Add(line);
+            double best = double.NegativeInfinity;
+            foreach (var v in realArr) if (!double.IsNaN(v)) best = Math.Max(best, v);
+            if (!double.IsInfinity(best)) lines.Add($"Best real score {best:0.#}" + (r?.weights != null ? $" · trained sim score {r.simScore:0.#}" : ""));
+            gains_label.text = string.Join("\n", lines);
+        }
+
         // what the lift system has learned about this design (rebuilt at most once a second)
         float last_vehicle_check = -10;
 
@@ -118,9 +257,8 @@ namespace K2D2.Training
                 vehicle_label.text = r == null
                     ? "This vehicle: not flown yet"
                     : $"This vehicle: {r.flights} flight(s) learned, model calibrated on {r.calFlights}";
-                var s = K2D2.Lift.LiftPilot.Instance.settings;
-                vehicle_label.text += "\nResults: " + (s.next_behaviour_model.V ? CraftMemory.DescribeTraining(model)
-                                                                                 : PlanLearner.Describe(model, s.destination_Ap_km.V, s.heading.V));
+                vehicle_label.text += "\nResults: " + CraftMemory.DescribeTraining(model);
+                UpdateProgress(r, CraftMemory.Key(model));
             }
             catch (Exception e)
             {

@@ -63,6 +63,17 @@ namespace K2D2.Node
         public double max_accel = 0;
         public float remaining_full_burn_time = 0;
 
+        // Opt-in: end the burn when the engines stop producing thrust while throttled up (the
+        // stage ran dry). Off by default because the Node pilot relies on StagingPilot staging
+        // through a flameout mid-burn. Stage1Burn turns it on so stage 1 can be asked for nearly
+        // all its Δv: if it runs dry the burn ends and separation carries on (2026-11-15: a 3%
+        // reserve, held back only to avoid a burn that never finishes, cost ~21 km of Pe).
+        public bool end_on_flameout = false;
+        const double FlameoutGraceS = 2;    // after ignition, for the engines to spool up
+        const double FlameoutHoldS = 0.5;   // no thrust for this long = flamed out
+        const float FlameoutMinThrottle = 0.05f;
+        double no_thrust_since = -1;
+
         ManeuverNodeData maneuver;
 
         public void StartManeuver(ManeuverNodeData node)
@@ -78,6 +89,7 @@ namespace K2D2.Node
             mode = Mode.Waiting;
             remaining_dv = 0;
             nan_since = -1;
+            no_thrust_since = -1;
             last_remaining_dv = -1;
 
             if (current_vessel == null) return;
@@ -224,6 +236,19 @@ namespace K2D2.Node
                 }
 
                 last_remaining_dv = remaining_dv;
+
+                if (end_on_flameout && now_ut - ignition_ut > FlameoutGraceS)
+                {
+                    bool no_thrust = last_throttle > FlameoutMinThrottle && burn_dV.actual_dv < 0.01f;
+                    if (!no_thrust) no_thrust_since = -1;
+                    else if (no_thrust_since < 0) no_thrust_since = now_ut;
+                    else if (now_ut - no_thrust_since > FlameoutHoldS)
+                    {
+                        logger.LogInfo($"[Burn] flameout with {remaining_dv:n1} m/s left - ending the burn");
+                        Finished();
+                        return;
+                    }
+                }
 
                 // var required_dv = maneuver.BurnRequiredDV;
                 // remaining_dv = required_dv - burn_dV.burned_dV;

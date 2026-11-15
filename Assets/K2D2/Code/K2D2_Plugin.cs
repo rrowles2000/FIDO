@@ -81,6 +81,8 @@ namespace K2D2
             logger = SWLogger;
             // Redux stable 0.2.8.5: unwrap the beta's late-bound UXML control data (see LateBoundCarrier).
             K2UI.LateBoundCarrier.Apply(new HarmonyLib.Harmony("K2D2.LateBoundCarrier"));
+            // no autosaves during training + the campaign screen's "Clear autosaves" button
+            K2D2.Saves.SaveTidy.Apply(new HarmonyLib.Harmony("K2D2.SaveTidy"));
         }
 
         /// <summary>
