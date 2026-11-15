@@ -358,7 +358,7 @@ namespace K2D2.Lift.Next
             model = K2D2.Lift.Stage1.Stage1Model.Build(vessel, allowNoUpper: true);
             model?.SetSurfaces(stability);
             CraftMemory.ApplyTo(ref ctx, model);
-            logger.LogInfo($"[Next] MEMORY {CraftMemory.Key(model)}: {CraftMemory.Describe(model)}");
+            logger.LogInfo($"[Next] MEMORY {CraftMemory.Key(model)} '{CraftMemory.DesignName(vessel.Name)}': {CraftMemory.Describe(model)}");
             calibration = CraftMemory.GetCalibration(model);
             logger.LogInfo($"[Next] CALIB using {calibration}");
             var trained = BehaviourTrainer.TrainForLaunch(model, ref ctx, heading_deg, settings.destination_Ap_km.V, calibration, CapKm(), vessel.Name, logger);
@@ -567,6 +567,16 @@ namespace K2D2.Lift.Next
                     double N = double.NaN;
                     rec.spareDv = spare;
                     if (p) rec.plannedSpareDv = check.spareDv;
+                    // stage 1's leftover: learn how far the sim's (unbiased) prediction was off - only
+                    // after a real cut-off or burnout, not a run that stopped early
+                    if (p && model != null && model.valid && !double.IsNaN(s1_left) &&
+                        (arbiter.behaviour == Behaviour.CutOff || arbiter.behaviour == Behaviour.BurntOut))
+                    {
+                        double err = s1_left - check.stage1LeftRawDv;
+                        double learned = CraftMemory.LearnS1Left(model, vessel.Name, err);
+                        logger.LogInfo($"[Train] S1 LEFT sim {check.stage1LeftRawDv:n0} m/s, real {s1_left:n0} m/s ({err:+0;-0;0}) -> " +
+                                       $"learned bias {learned:+0;-0;0} m/s (was {calibration.s1LeftBiasDv:+0;-0;0})");
+                    }
                     logger.LogInfo("[Next] PREDICTED -> ACTUAL at cut-off: " +
                                    $"T+ {Delta(p ? check.cutT : N, c.ut - launch_ut, " s")}, " +
                                    $"alt {Delta(p ? check.altKm : N, c.altitude / 1000, " km", "n1")}, " +

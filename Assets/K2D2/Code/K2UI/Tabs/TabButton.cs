@@ -39,8 +39,8 @@ namespace K2UI.Tabs
         public TabButton tab_button;
         public void setButton(TabButton bt)
         {
+            bt.name = name;   // first: the icon is chosen by the tab's code name
             bt.label = label;
-            bt.name = name;
         }
     }
 
@@ -69,6 +69,7 @@ namespace K2UI.Tabs
             {
                 _label = value;
                 el_label.text = value;
+                icon.Set(name, value);
             }
         }
         bool _active;
@@ -88,6 +89,7 @@ namespace K2UI.Tabs
                 _active = value;
 
                 EnableInClassList(activeUss, _active);
+                ApplyLook();
                 SendEvent(evt);
             }
         }
@@ -117,6 +119,27 @@ namespace K2UI.Tabs
 
         Label el_label;
         VisualElement el_light;
+        readonly TabIcon icon = new TabIcon();
+
+        static readonly UnityEngine.Color IconIdle = new UnityEngine.Color(0.72f, 0.76f, 0.8f);
+        static readonly UnityEngine.Color IconActive = new UnityEngine.Color(1f, 1f, 1f);
+        static readonly UnityEngine.Color EdgeActive = new UnityEngine.Color(0.37f, 0.66f, 1f);
+
+        // 2026-11-15: square icon buttons, the name as a hover tooltip (was a text label)
+        void ApplyLook()
+        {
+            icon.SetColor(_active ? IconActive : IconIdle);
+            if (_active)
+            {
+                style.borderBottomColor = EdgeActive;
+                style.borderBottomWidth = 3;
+            }
+            else
+            {
+                style.borderBottomColor = StyleKeyword.Null;
+                style.borderBottomWidth = StyleKeyword.Null;
+            }
+        }
         
         // This constructor allows users to set the contents of the label.
         public TabButton()
@@ -127,7 +150,20 @@ namespace K2UI.Tabs
             Add(el_light);
 
             el_label = new Label();
+            el_label.style.display = DisplayStyle.None; // the name is the tooltip now
             Add(el_label);
+            Add(icon);
+
+            // square: overrides the bundle's pill-shaped k2-tab-button sizing
+            style.width = style.height = 34;
+            style.minWidth = 34;
+            style.paddingLeft = style.paddingRight = style.paddingTop = style.paddingBottom = 0;
+            style.borderTopLeftRadius = style.borderTopRightRadius = style.borderBottomLeftRadius = style.borderBottomRightRadius = 6;
+            style.justifyContent = Justify.Center;
+            style.alignItems = Align.Center;
+            style.marginLeft = 3;
+            HoverTip.Attach(this, () => _label);
+            ApplyLook();
 
             // Style the control overall.
             AddToClassList(ussClassName);

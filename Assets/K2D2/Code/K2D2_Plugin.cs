@@ -83,6 +83,8 @@ namespace K2D2
             K2UI.LateBoundCarrier.Apply(new HarmonyLib.Harmony("K2D2.LateBoundCarrier"));
             // no autosaves during training + the campaign screen's "Clear autosaves" button
             K2D2.Saves.SaveTidy.Apply(new HarmonyLib.Harmony("K2D2.SaveTidy"));
+            // the VAB open dialog says which designs are trained
+            K2D2.Lift.Next.VabLoadDialogTag.Apply(new HarmonyLib.Harmony("K2D2.VabLoadDialog"));
         }
 
         /// <summary>

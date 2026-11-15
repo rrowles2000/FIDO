@@ -42,9 +42,13 @@ namespace K2D2.Lift.Next
             // stage 1's apoapsis burn needs this much more than an instant burn (finite burn, coast
             // drag) - learned from real separations (2026-11-14: 9-16 m/s on the 83 t vessel)
             public double s1BurnLossDv = 0;
+            // stage 1's real Δv left at cut-off minus the sim's (2026-11-15: -20..-34 m/s on the 83 t
+            // design - ~0.4 t more fuel burned on the way up than modelled). Added to the sim's
+            // leftover, so training keeps a real margin to the debris cap instead of the sim's 2-4 m/s.
+            public double s1LeftBiasDv = 0;
             public string source = "default";
             public Calibration Clone() => (Calibration)MemberwiseClone();
-            public override string ToString() => $"drag ×{dragScale:n2}, thrust ×{thrustScale:n3}, nose {aoaBiasDeg:+0.00;-0.00}°, AoA ×{aoaGain:n2}, trim {trimDeg:+0.00;-0.00}, S1 burn loss {s1BurnLossDv:n0} m/s ({source})";
+            public override string ToString() => $"drag ×{dragScale:n2}, thrust ×{thrustScale:n3}, nose {aoaBiasDeg:+0.00;-0.00}°, AoA ×{aoaGain:n2}, trim {trimDeg:+0.00;-0.00}, S1 burn loss {s1BurnLossDv:n0} m/s, S1 left {s1LeftBiasDv:+0;-0;0} m/s ({source})";
         }
 
         /// <summary>One point of the simulated ascent, for the [Next] PLAN log and the model export.</summary>
@@ -82,7 +86,8 @@ namespace K2D2.Lift.Next
             public double maxThrottle;
             // the simulated state at cut-off / burnout, kept to compare with the flight
             public double cutSpeed, cutPathDeg, cutPeKm, cutMass, cutT;
-            public double stage1LeftDv;   // stage 1's own Δv left at cut-off (vacuum)
+            public double stage1LeftDv;   // stage 1's own Δv left at cut-off (vacuum), with the learned bias
+            public double stage1LeftRawDv; // ... as simulated, before the bias (what the bias is learned against)
             public List<TracePoint> plan; // the chosen ascent, every PlanStepS
             public Calibration calibration;
             public double stage1Dv;       // vacuum, from the game's Δv data
@@ -242,9 +247,12 @@ namespace K2D2.Lift.Next
                 cutPeKm = double.IsInfinity(last.peR) ? 0 : (last.peR - model.body.radius) / 1000,
                 cutMass = last.mass,
                 cutT = last.t,
-                stage1LeftDv = res.leftoverDv,
+                stage1LeftRawDv = res.leftoverDv,
                 maxQLimitKPa = ctx.maxQKPa,
             };
+            // stage 1's leftover with the learned bias (Calibration.s1LeftBiasDv)
+            double left = Math.Max(0, res.leftoverDv + cal.s1LeftBiasDv);
+            r.stage1LeftDv = left;
             if (res.crashed || double.IsInfinity(last.apR) || last.apR <= 0)
             {
                 r.verdict = res.crashed ? Verdict.Short : Verdict.Ok;
@@ -257,17 +265,17 @@ namespace K2D2.Lift.Next
             double v_circ = Math.Sqrt(body.mu / ap);
             r.circDv = Math.Max(0, v_circ - v_ap);
             r.upperCircDv = r.circDv;
-            r.remainingDv = res.leftoverDv + model.UpperDeltaVVac;
+            r.remainingDv = left + model.UpperDeltaVVac;
 
             // Stage1Burn: stage 1's leftover at apoapsis up to the periapsis cap (less Stage1Burn.ReserveDv, as
             // Stage1Burn plans it), then dropped - anything above the cap is thrown away with it
-            if (ctx.s1ApBurn && res.leftoverDv > 0)
+            if (ctx.s1ApBurn && left > 0)
             {
                 double atmo_km = body.hasAtmosphere ? body.atmosphereDepth / 1000 : 0;
                 double cap_km = atmo_km > 0 ? Math.Min(ctx.s1CapPeKm, atmo_km - 2) : ctx.s1CapPeKm;
                 double cap_r = Math.Min(body.radius + cap_km * 1000, ap);
                 double v_cap = Math.Sqrt(Math.Max(0, body.mu * (2 / ap - 2 / (ap + cap_r))));
-                double usable = Math.Max(0, res.leftoverDv - K2D2.Lift.Stage1Burn.ReserveDv - cal.s1BurnLossDv);
+                double usable = Math.Max(0, left - K2D2.Lift.Stage1Burn.ReserveDv - cal.s1BurnLossDv);
                 r.s1ApBurnDv = Math.Max(0, Math.Min(v_cap - v_ap, usable));
                 r.s1UnusedDv = usable - r.s1ApBurnDv;
                 double v1 = v_ap + r.s1ApBurnDv;

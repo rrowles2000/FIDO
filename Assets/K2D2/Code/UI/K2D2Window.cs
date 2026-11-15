@@ -217,6 +217,9 @@ namespace K2D2.UI
             // save the current_tab to settings
             tab_page.Bind("main_page", K2D2.Mission.MissionUI.Code);
 
+            // yellow hint / result text becomes hover badges (K2UI.HoverTip)
+            K2UI.HoverTip.StartSweeping(_rootElement);
+
             // the K2 mascot avatar next to each status line is dropped
             _rootElement.Query<K2Avatar>().ForEach(a => a.style.display = DisplayStyle.None);
             PinStatusGroups();

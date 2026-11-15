@@ -66,6 +66,7 @@ namespace K2D2.Lift.Next
         public class Record
         {
             public string key, name;
+            public string designName;          // the VAB design's name: the flight name without its launch counter (2026-11-15)
             public double s1MassT, s1ThrustKN; // what the design is matched on (within MatchTolerance)
             public int finsAhead = -1, finsBehind = -1; // ... and exactly on these when both sides know them
             public int flights;
@@ -74,6 +75,8 @@ namespace K2D2.Lift.Next
             public double calDrag = 1, calThrust = 1, calAoA = 0, calAoAGain = 1, calTrim = 0;
             public double calS1Loss;          // stage-1 apoapsis burn loss, m/s (LearnS1BurnLoss)
             public int s1LossFlights;
+            public double calS1Left;          // stage-1 Δv left at cut-off, real minus sim, m/s (LearnS1Left)
+            public int s1LeftFlights;
             public int calFlights;
             public bool fragile;              // has drifted outside the kick
             public double capKPa;             // superseded 2026-11-14 (a throttle q cap cut steering authority); ignored
@@ -184,7 +187,7 @@ namespace K2D2.Lift.Next
         {
             var r = Get(model);
             if (r != null && r.calFlights > 0)
-                return new LaunchCheck.Calibration { dragScale = r.calDrag, thrustScale = r.calThrust, aoaBiasDeg = r.calAoA, aoaGain = r.calAoAGain > 0 ? r.calAoAGain : 1, trimDeg = r.calTrim, s1BurnLossDv = r.calS1Loss,
+                return new LaunchCheck.Calibration { dragScale = r.calDrag, thrustScale = r.calThrust, aoaBiasDeg = r.calAoA, aoaGain = r.calAoAGain > 0 ? r.calAoAGain : 1, trimDeg = r.calTrim, s1BurnLossDv = r.calS1Loss, s1LeftBiasDv = r.calS1Left,
                                                      source = $"this design, {r.calFlights} flight(s)" };
             double w = 0, d = 0, t = 0, k = 0, gsum = 0, trs = 0;
             foreach (var x in All().Values)
@@ -198,14 +201,77 @@ namespace K2D2.Lift.Next
                                                  source = "average of calibrated designs" };
         }
 
-                public static void SaveCalibration(Stage1Model model, string name, LaunchCheck.Calibration c)
+                // ---------------------------------------------------------------- names
+
+        /// <summary>
+        /// The VAB design a flight came from: the vessel name without a hand-written "(...)" note and
+        /// without the "-N" launch counter the game adds ("R2-1-2" -> "R2-1", "test002-1" -> "test002").
+        /// </summary>
+        public static string DesignName(string vesselName)
+        {
+            if (string.IsNullOrWhiteSpace(vesselName)) return null;
+            string n = System.Text.RegularExpressions.Regex.Replace(vesselName, @"\s*\(.*\)\s*$", "").Trim();
+            n = System.Text.RegularExpressions.Regex.Replace(n, @"-\d+$", "");
+            return n.Length > 0 ? n : vesselName.Trim();
+        }
+
+        static void Named(Record r, string name)
+        {
+            if (r == null || string.IsNullOrWhiteSpace(name)) return;
+            r.name = name;
+            r.designName = DesignName(name);
+        }
+
+        /// <summary>The design's display name ("R2-1"), else its key.</summary>
+        public static string DisplayName(Record r) => r == null ? null : r.designName ?? DesignName(r.name) ?? r.key;
+
+        static bool NameMatches(Record r, string workspace)
+        {
+            string w = workspace.Trim();
+            if (string.Equals(DisplayName(r), w, StringComparison.OrdinalIgnoreCase)) return true;
+            // a flight of that workspace: "<workspace>-<digits>" (older records have only the flight name)
+            string n = System.Text.RegularExpressions.Regex.Replace(r.name ?? "", @"\s*\(.*\)\s*$", "").Trim();
+            return n.StartsWith(w + "-", StringComparison.OrdinalIgnoreCase) &&
+                   System.Text.RegularExpressions.Regex.IsMatch(n.Substring(w.Length + 1), @"^\d+$");
+        }
+
+        /// <summary>For the VAB's open dialog: the most-trained record flown from a workspace of this name.</summary>
+        public static Record FindByDesignName(string workspaceName)
+        {
+            if (string.IsNullOrWhiteSpace(workspaceName)) return null;
+            Record best = null;
+            foreach (var r in All().Values)
+            {
+                if (!NameMatches(r, workspaceName)) continue;
+                if (best == null) { best = r; continue; }
+                bool r_trained = r.weights != null, best_trained = best.weights != null;
+                // a trained record beats an untrained one; between equals, the one flown most
+                if (r_trained != best_trained ? r_trained : r.flights > best.flights) best = r;
+            }
+            return best;
+        }
+
+        /// <summary>One line for the VAB's open dialog: whether the design is trained.</summary>
+        public static string TrainingStatus(Record r)
+        {
+            if (r == null) return "K2D2: not trained";
+            var real = r.realScores ?? new List<double>();
+            if (r.weights == null) return $"K2D2: not trained ({r.flights} flight(s) logged)";
+            if (real.Count == 0) return "K2D2: trained in the simulator, not flown yet";
+            double best = double.NegativeInfinity;
+            foreach (var v in real) if (v > best) best = v;
+            return $"K2D2: trained - {real.Count} scored flight(s), latest score {real[real.Count - 1]:0.#}, best {best:0.#}";
+        }
+
+        public static void SaveCalibration(Stage1Model model, string name, LaunchCheck.Calibration c)
         {
             string key = Key(model);
             if (key == null) return;
             var all = All();
             var r = Get(model);
-            if (r == null) all[key] = r = new Record { key = key, name = name, s1MassT = model.phases[0].startMass, s1ThrustKN = model.phases[0].thrustVac,
+            if (r == null) all[key] = r = new Record { key = key, s1MassT = model.phases[0].startMass, s1ThrustKN = model.phases[0].thrustVac,
                                                        finsAhead = model.finsAhead, finsBehind = model.finsBehind };
+            Named(r, name);
             r.calDrag = c.dragScale;
             r.calThrust = c.thrustScale;
             r.calAoA = c.aoaBiasDeg;
@@ -222,8 +288,9 @@ namespace K2D2.Lift.Next
             string key = Key(model);
             if (key == null) return null;
             var r = Get(model);
-            if (r == null) All()[key] = r = new Record { key = key, name = name, s1MassT = model.phases[0].startMass, s1ThrustKN = model.phases[0].thrustVac,
+            if (r == null) All()[key] = r = new Record { key = key, s1MassT = model.phases[0].startMass, s1ThrustKN = model.phases[0].thrustVac,
                                                          finsAhead = model.finsAhead, finsBehind = model.finsBehind };
+            Named(r, name);
             return r;
         }
 
@@ -246,6 +313,21 @@ namespace K2D2.Lift.Next
             r.s1LossFlights++;
             Save();
             return r.calS1Loss;
+        }
+
+        /// <summary>
+        /// After a cut-off: stage 1's real Δv left minus the sim's (unbiased) prediction. The first
+        /// flight sets it, later ones move it half way (newest weighted 1/2), like LearnS1BurnLoss.
+        /// </summary>
+        public static double LearnS1Left(Stage1Model model, string name, double errorDv)
+        {
+            var r = GetOrAdd(model, name);
+            if (r == null) return 0;
+            errorDv = Math.Max(-300, Math.Min(300, errorDv));
+            r.calS1Left = r.s1LeftFlights == 0 ? errorDv : 0.5 * r.calS1Left + 0.5 * errorDv;
+            r.s1LeftFlights++;
+            Save();
+            return r.calS1Left;
         }
 
         public static void RecordRealScore(Stage1Model model, string name, double score)
@@ -304,8 +386,8 @@ namespace K2D2.Lift.Next
             if (key == null) return;
             var all = All();
             var r = Get(model);
-            if (r == null) all[key] = r = new Record { key = key, name = name };
-            r.name = name;
+            if (r == null) all[key] = r = new Record { key = key };
+            Named(r, name);
             r.s1MassT = model.phases[0].startMass;
             r.s1ThrustKN = model.phases[0].thrustVac;
             if (model.finsAhead >= 0) { r.finsAhead = model.finsAhead; r.finsBehind = model.finsBehind; }

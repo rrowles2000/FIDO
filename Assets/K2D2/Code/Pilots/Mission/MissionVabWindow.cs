@@ -73,6 +73,7 @@ namespace K2D2.Mission
         void Build(VisualElement ui)
         {
             root = ui;
+            K2UI.HoverTip.StartSweeping(ui);
             shell = new UitkForKsp2.Controls.AppShell { Title = "K2-D2 Mission" };
             shell.style.position = Position.Absolute;
             shell.style.left = 380;
