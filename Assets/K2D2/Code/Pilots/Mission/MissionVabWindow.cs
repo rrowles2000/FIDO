@@ -103,6 +103,7 @@ namespace K2D2.Mission
                 part_count = Module_K2ActionTarget.CountInVab,
                 sat_count = Module_K2ActionTarget.MarkedSatellitesInVab,
                 context_signature = () => Module_K2ActionTarget.MarkedSatellitesInVab().ToString(),
+                launch_first = () => true, // a VAB craft is still to launch
             };
             scroll.Add(editor.Build());
 

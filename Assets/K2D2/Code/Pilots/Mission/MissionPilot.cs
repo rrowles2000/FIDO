@@ -132,7 +132,30 @@ namespace K2D2.Mission
             if (plan.status == "done") return "Mission complete";
             var errors = MissionValidator.Check(plan).Where(i => i.error).ToList();
             if (errors.Count > 0) return errors[0].text;
+            // on the pad (or landed) the next step to run must be Launch: a plan without one would run
+            // e.g. a decouple part action on the pad (2026-11-23)
+            if (OnGround())
+            {
+                int i = Math.Max(0, plan.current);
+                while (i < plan.steps.Count && plan.steps[i].type == StepCatalog.Quicksave) i++;
+                if (i < plan.steps.Count && plan.steps[i].type != StepCatalog.Launch)
+                    return $"Step {i + 1} ({plan.steps[i].Summary}) would run on the pad - add a Launch step before it";
+            }
             return null;
+        }
+
+        /// <summary>The craft is on the pad, landed or splashed down: still to launch.</summary>
+        public static bool OnGround()
+        {
+            var v = K2D2_Plugin.Instance?.current_vessel?.VesselComponent;
+            if (v == null) return false;
+            try
+            {
+                var sit = v.Situation;
+                return v.Landed || sit == KSP.Sim.impl.VesselSituations.PreLaunch || sit == KSP.Sim.impl.VesselSituations.Landed ||
+                       sit == KSP.Sim.impl.VesselSituations.Splashed;
+            }
+            catch { return false; }
         }
 
         public void Go()

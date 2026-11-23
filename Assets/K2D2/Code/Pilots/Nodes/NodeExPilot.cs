@@ -18,6 +18,8 @@ namespace K2D2.Node
     public class NodeExPilot : Pilot
     {
         public ILogger logger = ReduxLib.ReduxLib.GetLogger("K2D2.NodeExecute");
+        BurndV burn_time_probe;
+        string burn_time_logged;
 
         public static NodeExPilot Instance { get; set; }
 
@@ -392,7 +394,8 @@ namespace K2D2.Node
                         UT = execute_node.Time;
                         break;
                     case NodeExSettings.StartMode.half_duration:
-                        UT = execute_node.Time - execute_node.BurnDuration / 2;
+                        burn_time_probe ??= new BurndV();
+                        UT = execute_node.Time - burn_time_probe.SaneBurnDuration(execute_node, 0, ref burn_time_logged, logger) / 2;
                         break;
                     case NodeExSettings.StartMode.constant:
                         UT = execute_node.Time - settings.start_before.V;

@@ -318,6 +318,7 @@ namespace K2D2.Constellation
             steps.Enqueue(new ActionStep("Taking control from the carrier", () =>
                 ConstellationVessel.SetControlFrom(current_vessel.VesselComponent, carrier_command)));
             steps.Enqueue(new NodeStep(this, "Raise/lower to survey altitude", PlanAltitudeBurn1));
+            steps.Enqueue(new NodeStep(this, "Correct the transfer orbit", PlanAltitudeCorrection));
             steps.Enqueue(new NodeStep(this, "Circularize at survey altitude", PlanAltitudeBurn2));
             steps.Enqueue(new ActionStep("Recording reference orbit", RecordReference));
 
@@ -407,6 +408,7 @@ namespace K2D2.Constellation
             K2D2_Plugin.ResetControllers();
             steps.Clear();
             steps.Enqueue(new NodeStep(this, "Raise/lower to target altitude", PlanAltitudeBurn1));
+            steps.Enqueue(new NodeStep(this, "Correct the transfer orbit", PlanAltitudeCorrection));
             steps.Enqueue(new NodeStep(this, "Circularize at target altitude", PlanAltitudeBurn2));
             end_status = "";
             job = Job.Altitude;
@@ -669,6 +671,25 @@ namespace K2D2.Constellation
             KeplerPropagator.Propagate(r, v, mu, dt, out var rb, out var vb);
             double newSma = (rb.magnitude + target) / 2.0;
             return new BurnPlan { UT = now + dt, prograde = OrbitMath.SpeedAt(mu, rb.magnitude, newSma) - vb.magnitude };
+        }
+
+        /// <summary>
+        /// After the raise/lower burn (2026-11-23): if the far apsis missed the target altitude by more
+        /// than max(tolerance, 3%), burn again at the near apsis (PlanAltitudeBurn1 from the new orbit)
+        /// instead of circularising at the wrong altitude. A burn that stopped half done left Ap at
+        /// 314 km for an 800 km target and the constellation was deployed there.
+        /// </summary>
+        BurnPlan PlanAltitudeCorrection()
+        {
+            GetState(out var r, out var v, out double mu);
+            LandingTargeting.OrbitalElementsFromStateVectors(r, v, mu, out _, out double ap, out double pe);
+            double target = Body.radius + TargetAltitude;
+            double tol = Math.Max(settings.altitude_tolerance_km.V * 1000.0, 0.03 * TargetAltitude);
+            // raising: the far apsis is Ap; lowering: it is Pe
+            double far = Math.Abs(ap - target) < Math.Abs(pe - target) ? ap : pe;
+            if (Math.Abs(far - target) <= tol) return null;
+            logger.LogWarning($"[Constellation] transfer orbit misses the target: far apsis {(far - Body.radius) / 1000:n1} km for {TargetAltitude / 1000:n0} km - correcting");
+            return PlanAltitudeBurn1();
         }
 
         BurnPlan PlanAltitudeBurn2()
@@ -996,7 +1017,11 @@ namespace K2D2.Constellation
 
             const double MinBurn = 0.05;
 
-            enum Phase { Create, WaitNode, Verify, Warp, Turn, Burn, Settle, Done }
+            enum Phase { Create, WaitNode, Verify, Warp, Turn, FinalWarp, Burn, Settle, Done }
+
+            // after lining up, warp again to this long before ignition (2026-11-23: it used to sit at
+            // 1x for most of the minute between the first warp and ignition)
+            const double FinalWarpLeadS = 10;
             readonly SettleWait settle = new();
             Phase phase;
             ManeuverNodeData node;
@@ -1038,17 +1063,10 @@ namespace K2D2.Constellation
                 pilot.maneuver_creator.RemoveAllNodesThenCreate(p.UT, p.prograde, n => node = n, p.normal);
             }
 
-            // the game's BurnDuration is at full thrust; the acceleration cap stretches it
-            double BurnStartUT
-            {
-                get
-                {
-                    accel_probe.LateUpdate();
-                    double cap = pilot.settings.max_accel.V;
-                    double stretch = accel_probe.full_dv > cap ? accel_probe.full_dv / cap : 1;
-                    return node.Time - node.BurnDuration * stretch / 2;
-                }
-            }
+            // half the burn before the node: the game's BurnDuration (at full thrust, stretched by the
+            // acceleration cap) unless it disagrees with Δv / acceleration - see BurndV.SaneBurnDuration
+            double BurnStartUT => node.Time - accel_probe.SaneBurnDuration(node, pilot.settings.max_accel.V, ref burn_time_logged, pilot.logger) / 2;
+            string burn_time_logged;
             readonly BurndV accel_probe = new();
             public double NodeUT => node?.Time ?? 0;
 
@@ -1099,9 +1117,21 @@ namespace K2D2.Constellation
                         turn.Update();
                         status = turn.status_line;
                         if (!turn.finished) return false;
-                        burn.StartManeuver(node);
-                        burn.max_accel = pilot.settings.max_accel.V;
-                        phase = Phase.Burn;
+                        if (BurnStartUT - GeneralTools.Current_UT > FinalWarpLeadS + 5)
+                        {
+                            warp.Start_Ut(BurnStartUT - FinalWarpLeadS);
+                            phase = Phase.FinalWarp;
+                            return false;
+                        }
+                        StartBurn();
+                        return false;
+
+                    case Phase.FinalWarp:
+                        warp.Update();
+                        status = "lined up - " + warp.status_line;
+                        if (!warp.finished) return false;
+                        TimeWarpTools.SetRateIndex(0, false);
+                        StartBurn();
                         return false;
 
                     case Phase.Burn:
@@ -1125,6 +1155,13 @@ namespace K2D2.Constellation
                     default:
                         return true;
                 }
+            }
+
+            void StartBurn()
+            {
+                burn.StartManeuver(node);
+                burn.max_accel = pilot.settings.max_accel.V;
+                phase = Phase.Burn;
             }
 
             void StartWarp()

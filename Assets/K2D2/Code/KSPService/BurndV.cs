@@ -67,6 +67,34 @@ namespace K2D2.KSPService
             }
         }
 
+        /// <summary>
+        /// Burn time for a node - K2D2's own (2026-11-23): node Δv / acceleration (full thrust of the
+        /// active engines, capped at max_accel when > 0). The game's ManeuverNodeData.BurnDuration came
+        /// out ~800 s for a 360 m/s burn on a constellation carrier (it works from the wrong stage), so
+        /// the burn lit 716 s before the node and burned mostly backwards. The game's time is only
+        /// used when there's no thrust to work from; a disagreement beyond x1.5 is logged once per
+        /// node. Returns seconds.
+        /// </summary>
+        public double SaneBurnDuration(KSP.Sim.Maneuver.ManeuverNodeData node, double max_accel, ref string logged_for, ILogger log)
+        {
+            if (node == null) return 0;
+            Compute_Thrust();
+            double a = full_dv;
+            double stretch = max_accel > 0 && a > max_accel ? a / max_accel : 1;
+            double game = node.BurnDuration * stretch;
+            if (!(a > 0)) return game;
+            double own = node.BurnRequiredDV / (max_accel > 0 ? System.Math.Min(a, max_accel) : a);
+            bool agree = game > 0 && !double.IsNaN(game) && game <= own * 1.5 && game >= own / 1.5;
+            string key = node.NodeID.ToString();
+            if (!agree && logged_for != key)
+            {
+                logged_for = key;
+                log?.LogWarning($"[Burn] game burn time {node.BurnDuration:n1} s (x{stretch:n2} cap = {game:n1} s) disagrees with Δv {node.BurnRequiredDV:n1} m/s / " +
+                                $"{(max_accel > 0 ? System.Math.Min(a, max_accel) : a):n2} m/s² = {own:n1} s - K2D2 uses {own:n1} s");
+            }
+            return own;
+        }
+
         public void Compute_Thrust()
         {
             if (current_vessel.VesselComponent == null) return;

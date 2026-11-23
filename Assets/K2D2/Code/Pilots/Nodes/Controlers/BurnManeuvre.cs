@@ -28,6 +28,13 @@ namespace K2D2.Node
         // Experimental section) is left in place for anyone who wants the old fixed-orientation
         // behavior back.
         public static Setting<bool> rotate_during_burn = new ("node_ex.burn.rotate_during_burn", true);
+        // K2D2 owns the burn (2026-11-23, default on): "remaining" = node Δv minus the Δv the engines
+        // have delivered along the node direction, counted every frame from their real thrust, the
+        // vessel's mass and the nose's angle to the node - see BurnManeuver.OwnRemaining. Off = the
+        // old way: the game's maneuver solver's "velocity after the burn" minus the current velocity,
+        // which the game models over its own BurnDuration (811 s for a 72 s burn on a constellation
+        // carrier: the burn stopped half done). Global, like rotate_during_burn.
+        public static Setting<bool> own_burn = new ("node_ex.burn.own_burn", true);
     }
 
     public class BurnManeuver : ExecuteController
@@ -103,6 +110,111 @@ namespace K2D2.Node
             Vector velocity_after_maneuver = current_vessel.VesselComponent.Orbiter.ManeuverPlanSolver.GetVelocityAfterFirstManeuver(out ut);
             var current_vel = current_vessel.VesselComponent.Orbit.GetOrbitalVelocityAtUTZup(ut);
             initial_dir = velocity_after_maneuver.vector - current_vel;
+            delivered_dv = 0;
+            LogGeometry("start", velocity_after_maneuver, ut, current_vel);
+        }
+
+        // ---------------------------------------------------------------- own burn (2026-11-23)
+        // Δv delivered along the node direction since ignition: thrust acceleration (engines' real
+        // thrust / mass) x cos(nose to node direction) x game time, summed every frame. Frame-free
+        // and the same for prograde, normal and radial nodes; independent of the game's solver.
+        double delivered_dv, last_count_ut;
+        bool owning; // own_burn latched at ignition
+
+        double OwnRemaining(double now_ut)
+        {
+            double dt = now_ut - last_count_ut;
+            last_count_ut = now_ut;
+            if (dt > 0 && dt < 5)
+            {
+                double a = NodeAngleDeg();
+                double cos = double.IsNaN(a) ? 1 : Math.Max(0, Math.Cos(a * Math.PI / 180));
+                delivered_dv += burn_dV.actual_dv * cos * dt;
+            }
+            return maneuver.BurnRequiredDV - delivered_dv;
+        }
+
+        /// <summary>Angle (°) of the vessel's nose (control part up) to the game's node direction; NaN without one.</summary>
+        double NodeAngleDeg()
+        {
+            try
+            {
+                var tel = SASTool.getTelemetry();
+                if (tel == null || !tel.HasManeuver) return double.NaN;
+                var dir = tel.ManeuverDirection;
+                var r = Rotation.Reframed(current_vessel.GetRotation(), dir.coordinateSystem);
+                Vector3d fwd = (r.localRotation * Vector3.up).normalized;
+                return Vector3d.Angle(dir.vector, fwd);
+            }
+            catch { return double.NaN; }
+        }
+
+        /// <summary>Burn time at the capped acceleration (max_accel when > 0), from the node Δv - K2D2's own, not the game's.</summary>
+        double OwnBurnTime()
+        {
+            burn_dV.LateUpdate();
+            double a = burn_dV.full_dv;
+            if (!(a > 0)) return double.NaN;
+            if (max_accel > 0) a = Math.Min(a, max_accel);
+            return maneuver.BurnRequiredDV / a;
+        }
+
+        // ---------------------------------------------------------------- diagnostics (2026-11-23)
+        // A constellation altitude burn on an 81° orbit started with 978 m/s "remaining" for a 359 m/s
+        // node and then burned the wrong way for two minutes. These lines show, at start, ignition and
+        // every LogPeriodS while burning, whether the node, the target velocity or the pointing is off:
+        //   node      the game's node: time, required Δv, raw BurnVector
+        //   target    the frame of the solver's after-burn velocity, its speed minus the current
+        //             speed at the node (frame-independent: ~node Δv for a pure prograde burn) and
+        //             the vector difference K2D2 steers by (they disagree if the frames don't match)
+        //   split     that difference along prograde / normal / radial-out of the current orbit at
+        //             the node (Zup, the frame GetOrbitalVelocityAtUTZup uses)
+        //   pointing  angle of the vessel's nose (control part 'up') to the game's own node direction,
+        //             to prograde and to retrograde, all in the game's frames
+
+        static string V3(Vector3d v) => $"({v.x:0.0}, {v.y:0.0}, {v.z:0.0})";
+
+        void LogGeometry(string what, Vector velocity_after, double ut, Vector3d current_vel)
+        {
+            try
+            {
+                var vc = current_vessel?.VesselComponent;
+                if (vc == null) return;
+                var delta = velocity_after.vector - current_vel;
+                string node = maneuver == null ? "none" :
+                    $"T {maneuver.Time - GeneralTools.Game.UniverseModel.UniverseTime:n1}s, Δv {maneuver.BurnRequiredDV:n1}, BurnVector {V3(maneuver.BurnVector)}";
+                string frame = velocity_after.coordinateSystem?.ToString() ?? "null";
+
+                var pos = vc.Orbit.GetRelativePositionAtUTZup(ut);
+                var pro = current_vel.normalized;
+                var nrm = Vector3d.Cross(pos, current_vel).normalized;
+                var rad = Vector3d.Cross(current_vel, nrm).normalized; // radial-out, orthogonal to prograde
+
+                logger.LogInfo($"[Burn] {what} geometry: {(BurnManeuverSettings.own_burn.V ? "K2D2 owns the burn" : "solver burn")} | node {node} | target frame {frame}, |after| {velocity_after.vector.magnitude:n1} - |now| {current_vel.magnitude:n1} = " +
+                               $"{velocity_after.vector.magnitude - current_vel.magnitude:n1} m/s, |after - now| {delta.magnitude:n1} m/s | " +
+                               $"split prograde {Vector3d.Dot(delta, pro):n1} normal {Vector3d.Dot(delta, nrm):n1} radial-out {Vector3d.Dot(delta, rad):n1} | {Pointing()}");
+            }
+            catch (Exception e) { logger.LogWarning("[Burn] geometry log failed: " + e.Message); }
+        }
+
+        string Pointing()
+        {
+            try
+            {
+                var tel = SASTool.getTelemetry();
+                if (tel == null) return "pointing: no telemetry";
+                Rotation rot = current_vessel.GetRotation();
+                double Ang(Vector dir)
+                {
+                    var r = Rotation.Reframed(rot, dir.coordinateSystem);
+                    Vector3d fwd = (r.localRotation * Vector3.up).normalized;
+                    return Vector3d.Angle(dir.vector, fwd);
+                }
+                string man = tel.HasManeuver ? $"{Ang(tel.ManeuverDirection):n1}°" : "no node";
+                var pro = tel.OrbitMovementPrograde;
+                return $"pointing: nose to node direction {man}, to prograde {Ang(pro):n1}°, to retrograde {180 - Ang(pro):n1}°, autopilot {SASTool.currentAutoPilot()?.AutopilotMode}";
+            }
+            catch (Exception e) { return "pointing: " + e.Message; }
         }
 
         Vector3d initial_dir = Vector3d.zero;
@@ -119,6 +231,8 @@ namespace K2D2.Node
               double.IsInfinity(v.x) || double.IsInfinity(v.y) || double.IsInfinity(v.z));
         int sign = 0;
         float angle;
+        bool log_geometry_at_ignition;
+        double solver_remaining = double.NaN;
 
         public double UT = 0;
 
@@ -135,8 +249,9 @@ namespace K2D2.Node
             if (o == null) return;
             double R = o.referenceBody.radius;
             double now = GeneralTools.Game.UniverseModel.UniverseTime;
-            logger.LogInfo($"[Burn] {what}: {(now - UT >= 0 ? "+" : "")}{now - UT:n1}s from planned ignition, remaining {remaining_dv:n1} m/s, " +
-                           $"angle off start {angle:n1}°, throttle {last_throttle:n2}, Ap {(o.Apoapsis - R) / 1000:n1} Pe {(o.Periapsis - R) / 1000:n1} km, " +
+            logger.LogInfo($"[Burn] {what}: {(now - UT >= 0 ? "+" : "")}{now - UT:n1}s from planned ignition, remaining {remaining_dv:n1} m/s" +
+                           (owning ? $" (delivered {delivered_dv:n1}, game solver says {solver_remaining:n1})" : "") + ", " +
+                           $"{(owning ? "nose off node" : "angle off start")} {angle:n1}°, throttle {last_throttle:n2}, Ap {(o.Apoapsis - R) / 1000:n1} Pe {(o.Periapsis - R) / 1000:n1} km, " +
                            $"inc {o.inclination:n2}°, mass {v.totalMass:n2} t");
         }
 
@@ -153,14 +268,10 @@ namespace K2D2.Node
                 if (start_dt > 0)
                 {
                     status_line = $"Ignition in {StrTool.DurationToString(start_dt)}";
-                    // the game's burn timer assumes full thrust; say how long the capped burn really takes
-                    if (max_accel > 0)
-                    {
-                        burn_dV.LateUpdate();
-                        if (burn_dV.full_dv > max_accel)
-                            status_line += $" - burn {StrTool.DurationToString(maneuver.BurnDuration * burn_dV.full_dv / max_accel)}" +
-                                           $" at {max_accel:0.#} m/s² (game timer assumes full thrust)";
-                    }
+                    // K2D2's own burn time (the game's timer can be wildly off, and assumes full thrust)
+                    double own_t = OwnBurnTime();
+                    if (!double.IsNaN(own_t))
+                        status_line += $" - burn {StrTool.DurationToString(own_t)}" + (max_accel > 0 && burn_dV.full_dv > max_accel ? $" at {max_accel:0.#} m/s²" : "");
                     set_throttle(0);
                     return;
                 }
@@ -169,7 +280,13 @@ namespace K2D2.Node
                     mode = Mode.Burning;
                     ignition_ut = GeneralTools.Game.UniverseModel.UniverseTime;
                     next_log_ut = 0;
-                    LogBurn($"ignition (node Δv {maneuver.BurnRequiredDV:n1} m/s)");
+                    owning = BurnManeuverSettings.own_burn.V;
+                    delivered_dv = 0;
+                    last_count_ut = ignition_ut;
+                    remaining_dv = maneuver.BurnRequiredDV;
+                    LogBurn($"ignition (node Δv {maneuver.BurnRequiredDV:n1} m/s, K2D2 burn time {OwnBurnTime():n1} s, game's {maneuver.BurnDuration:n1} s" +
+                            $"{(owning ? "" : ", solver burn")})");
+                    log_geometry_at_ignition = true;
 
                     if (BurnManeuverSettings.rotate_during_burn.V)
                         SASTool.setAutoPilot(AutopilotMode.Maneuver);
@@ -201,9 +318,24 @@ namespace K2D2.Node
                     TimeWarpTools.SetRateIndex(max_warp_index, false);
 
                 var current_vel = current_vessel.VesselComponent.Orbit.GetOrbitalVelocityAtUTZup(ut);
-                var delta_speed_vector = velocity_after_maneuver.vector - current_vel;
                 double now_ut = GeneralTools.Game.UniverseModel.UniverseTime;
-                if (!Finite(delta_speed_vector))
+                if (log_geometry_at_ignition)
+                {
+                    log_geometry_at_ignition = false;
+                    LogGeometry("ignition", velocity_after_maneuver, ut, current_vel);
+                }
+                var delta_speed_vector = velocity_after_maneuver.vector - current_vel;
+                // the solver's view, kept for the log (and used when own_burn is off)
+                solver_remaining = Finite(delta_speed_vector)
+                    ? (Finite(initial_dir) && initial_dir.sqrMagnitude > 1e-6 ? Math.Sign(Vector3d.Dot(initial_dir, delta_speed_vector)) : 1) * delta_speed_vector.magnitude
+                    : double.NaN;
+
+                if (owning)
+                {
+                    remaining_dv = OwnRemaining(now_ut);
+                    angle = (float)NodeAngleDeg();
+                }
+                else if (!Finite(delta_speed_vector))
                 {
                     if (nan_since < 0)
                     {
@@ -223,16 +355,19 @@ namespace K2D2.Node
                     logger.LogInfo($"[Burn] maneuver solver recovered after {now_ut - nan_since:n1} s");
                     nan_since = -1;
                 }
-                if (!Finite(initial_dir) || initial_dir.sqrMagnitude < 1e-6) initial_dir = delta_speed_vector;
-                sign = Math.Sign(Vector3d.Dot(initial_dir, delta_speed_vector));
-
-                angle = (float)Vector3d.Angle(initial_dir, delta_speed_vector);
-                remaining_dv = sign * delta_speed_vector.magnitude;
-
-                if (last_remaining_dv > 0 && last_remaining_dv < 1 && remaining_dv > last_remaining_dv)
+                if (!owning)
                 {
-                    Finished();
-                    return;
+                    if (!Finite(initial_dir) || initial_dir.sqrMagnitude < 1e-6) initial_dir = delta_speed_vector;
+                    sign = Math.Sign(Vector3d.Dot(initial_dir, delta_speed_vector));
+
+                    angle = (float)Vector3d.Angle(initial_dir, delta_speed_vector);
+                    remaining_dv = sign * delta_speed_vector.magnitude;
+
+                    if (last_remaining_dv > 0 && last_remaining_dv < 1 && remaining_dv > last_remaining_dv)
+                    {
+                        Finished();
+                        return;
+                    }
                 }
 
                 last_remaining_dv = remaining_dv;
@@ -266,6 +401,7 @@ namespace K2D2.Node
                     {
                         next_log_ut = now_ut + LogPeriodS;
                         LogBurn("burning");
+                        logger.LogInfo($"[Burn]   {Pointing()}");
                     }
                 }
             }

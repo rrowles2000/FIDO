@@ -31,6 +31,9 @@ namespace K2D2.Mission
         public Func<KSP.Sim.impl.CelestialBodyComponent> current_body;
         // anything outside the plan that changes what the view shows (e.g. satellite marks)
         public Func<string> context_signature;
+        // the craft is still to launch (VAB, or in flight on the pad / landed): the plan must start with
+        // Launch + Circularise, so Go on the pad never runs another step (e.g. a decouple) first
+        public Func<bool> launch_first = () => false;
 
         public VisualElement root;
         VisualElement list_el, issues_el, add_row;
@@ -74,15 +77,43 @@ namespace K2D2.Mission
 
         // ================================================================ edits
 
+        /// <summary>
+        /// For a craft still to launch (launch_first): puts Launch + Circularise at the top of a plan that
+        /// has no Launch step (after any leading quicksaves), and returns the first index a new step may
+        /// take - after that pair. Otherwise returns 0. (2026-11-23: a plan that started with a part
+        /// action decoupled on the pad when Go was pressed.)
+        /// </summary>
+        int EnsureLaunchFirst(MissionPlanData plan, bool adding_launch)
+        {
+            if (!launch_first()) return 0;
+            int lead = 0;
+            while (lead < plan.steps.Count && plan.steps[lead].type == StepCatalog.Quicksave) lead++;
+            int launch = plan.steps.FindIndex(x => x.type == StepCatalog.Launch);
+            if (launch < 0)
+            {
+                if (adding_launch) return lead; // the step being added is the Launch: it goes first
+                ShiftExpanded(lead, 2);
+                plan.steps.Insert(lead, StepCatalog.Get(StepCatalog.Launch).NewStep());
+                plan.steps.Insert(lead + 1, StepCatalog.Get(StepCatalog.Circularise).NewStep());
+                if (selected >= lead) selected += 2;
+                launch = lead;
+            }
+            bool circ = launch + 1 < plan.steps.Count && plan.steps[launch + 1].type == StepCatalog.Circularise;
+            return launch + (circ ? 2 : 1);
+        }
+
         void AddStep()
         {
             var plan = get_plan();
             if (plan == null) return;
             var type = StepCatalog.All.FirstOrDefault(t => t.label == type_dropdown.value);
             if (type == null) return;
+            int after_launch = EnsureLaunchFirst(plan, type.id == StepCatalog.Launch);
             int first_editable = Enumerable.Range(0, plan.steps.Count + 1).FirstOrDefault(i => i >= plan.steps.Count || editable(i));
             int at = selected >= 0 && selected < plan.steps.Count ? selected + 1 : plan.steps.Count;
             at = Math.Max(at, first_editable);
+            if (type.id != StepCatalog.Launch) at = Math.Max(at, after_launch);
+            else if (launch_first() && !plan.steps.Any(x => x.type == StepCatalog.Launch)) at = after_launch; // first, after quicksaves
             ShiftExpanded(at, 1);
             plan.steps.Insert(at, type.NewStep());
             // Circularise has to follow Launch, so it comes with it
@@ -113,8 +144,10 @@ namespace K2D2.Mission
                 Changed(selected);
                 return;
             }
+            int after_launch = EnsureLaunchFirst(plan, false);
             int first_editable = Enumerable.Range(0, plan.steps.Count + 1).FirstOrDefault(i => i >= plan.steps.Count || editable(i));
             int at = Math.Max(selected >= 0 && selected < plan.steps.Count ? selected + 1 : plan.steps.Count, first_editable);
+            at = Math.Max(at, after_launch);
             var step = StepCatalog.Get(StepCatalog.PartActions).NewStep();
             step.actions.Add(action);
             ShiftExpanded(at, 1);
@@ -448,7 +481,11 @@ namespace K2D2.Mission
             (s.actions[k], s.actions[j]) = (s.actions[j], s.actions[k]);
         }
 
-        // "Preset: [dropdown] [Set]" - writes all of the preset's values at once
+        // "Preset: [dropdown]" - picking a preset writes all of its values at once (2026-11-23: it used to
+        // need a separate Set button, so picking North polar left the inclination at 0°, and the dropdown
+        // showed the first preset even when the settings matched none of them)
+        const string CustomPreset = "Custom";
+
         VisualElement PresetRow(MissionStepData s, StepType type, int i, bool can_edit)
         {
             var row = new VisualElement();
@@ -457,21 +494,20 @@ namespace K2D2.Mission
             row.style.marginBottom = 2;
             var labels = type.presets.Select(p => p.label).ToList();
             int current = type.presets.FindIndex(p => p.Matches(s));
+            if (current < 0) labels.Insert(0, CustomPreset);
             var dropdown = new DropdownField("Preset", labels, Math.Max(0, current));
             dropdown.style.flexGrow = 1;
-            dropdown.tooltip = current >= 0 ? "Current settings match this preset" : "Current settings are custom";
-            var set = new Button(() =>
+            dropdown.tooltip = current >= 0 ? "Current settings match this preset" : "Current settings match no preset";
+            dropdown.RegisterValueChangedCallback(e =>
             {
-                var preset = type.presets.FirstOrDefault(p => p.label == dropdown.value);
-                if (preset == null) return;
+                var preset = type.presets.FirstOrDefault(p => p.label == e.newValue);
+                if (preset == null) return; // "Custom"
                 foreach (var kv in preset.values) s.p[kv.Key] = kv.Value;
-                Changed(i);
-            }) { text = "Set" };
-            set.style.height = 22;
+                // rebuild after the dropdown's own callback has finished (the rebuild replaces it)
+                root.schedule.Execute(() => Changed(i));
+            });
             dropdown.SetEnabled(can_edit);
-            set.SetEnabled(can_edit);
             row.Add(dropdown);
-            row.Add(set);
             return row;
         }
 

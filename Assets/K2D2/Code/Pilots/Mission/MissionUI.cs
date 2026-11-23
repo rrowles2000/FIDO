@@ -121,6 +121,7 @@ namespace K2D2.Mission
                 part_count = tag => PartActionCatalog.FindInFlight(K2D2_Plugin.Instance.current_vessel?.VesselComponent, tag).Count,
                 sat_count = () => K2D2.Constellation.ConstellationVessel.FindSatellites(K2D2_Plugin.Instance.current_vessel?.VesselComponent).Count,
                 current_body = () => K2D2_Plugin.Instance.current_vessel?.VesselComponent?.mainBody,
+                launch_first = MissionPilot.OnGround,
             };
             steps.Add(editor.Build());
             plan_el.Add(steps);
