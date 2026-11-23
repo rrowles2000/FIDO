@@ -253,6 +253,27 @@ namespace K2D2.Lift.Next
             return best;
         }
 
+        /// <summary>
+        /// The VAB open dialog's "Reset K2D2 training" button (2026-11-23): forgets everything learned
+        /// about every record flown from a workspace of these names - weights, calibration, fragile
+        /// flag, history. The next launch check trains the design from scratch. Returns how many went.
+        /// </summary>
+        public static int ResetByDesignName(params string[] workspaceNames)
+        {
+            var all = All();
+            var doomed = new List<string>();
+            foreach (var kv in all)
+                foreach (var w in workspaceNames)
+                    if (!string.IsNullOrWhiteSpace(w) && NameMatches(kv.Value, w)) { doomed.Add(kv.Key); break; }
+            foreach (var k in doomed) all.Remove(k);
+            if (doomed.Count > 0)
+            {
+                Save();
+                logger.LogInfo($"[Memory] reset training for '{string.Join("' / '", workspaceNames)}': removed {string.Join(", ", doomed)}");
+            }
+            return doomed.Count;
+        }
+
         /// <summary>One line for the VAB's open dialog: whether the design is trained.</summary>
         public static string TrainingStatus(Record r)
         {
