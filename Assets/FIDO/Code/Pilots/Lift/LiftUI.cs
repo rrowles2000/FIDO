@@ -87,41 +87,50 @@ namespace Fido.Lift
 
         Label polar_hint;
 
-        // POLAR LAUNCH: works out the launch heading for a chosen inclination (90° = polar) from
-        // the pad's latitude, the target orbit speed and the planet's rotation, and writes it into
-        // the Heading compass above. Built in code since the bundle's Lift.uxml has no slot for it.
+        // HEADING BUTTONS: the Heading compass is the launch setting and reads like the navball
+        // (0 north, 90 east, 180 south, 270 west). East/West/North/South set those headings; Polar
+        // works out the heading for a 90° (polar) orbit going north - a little west of north, to
+        // cancel the eastward speed the planet's spin gives at launch. Built in code since the
+        // bundle's Lift.uxml has no slot for it. (Replaced the POLAR LAUNCH inclination calculator,
+        // 2026-11-24: the inclination box didn't steer by itself, which read as "inclination ignored".)
         void BuildPolarLaunch(Foldout profile, LiftSettings settings)
         {
             if (profile == null) return;
 
-            var polar = new Foldout { text = "POLAR LAUNCH", value = false };
-            var heading_row = profile.Q<VisualElement>("heading_row");
-            int index = heading_row != null ? profile.contentContainer.IndexOf(heading_row) : -1;
-            if (index >= 0) profile.contentContainer.Insert(index, polar);
-            else profile.Add(polar);
+            var row = new VisualElement();
+            row.style.flexDirection = FlexDirection.Row;
+            row.style.marginTop = 4;
+            row.style.marginBottom = 2;
+            VisualElement compass = profile.Q<K2Compass>("heading");
+            var parent = compass?.parent ?? profile.contentContainer;
+            int index = compass != null ? parent.IndexOf(compass) + 1 : -1;
+            if (index >= 0) parent.Insert(index, row);
+            else profile.Add(row);
 
-            var inc_field = new FloatField("Inclination (°)") { isDelayed = true };
-            inc_field.Bind(settings.polar_inclination);
-            polar.Add(inc_field);
-
-            var south = new K2Toggle("Launch southward");
-            south.Bind(settings.polar_south);
-            polar.Add(south);
-
-            var set_button = new Button(() => ApplyPolarHeading(settings)) { text = "Set launch heading" };
-            set_button.style.height = 26;
-            polar.Add(set_button);
+            void Add(string text, System.Action click)
+            {
+                var b = new Button(click) { text = text };
+                b.style.height = 26;
+                b.style.flexGrow = 1;
+                b.style.marginLeft = b.style.marginRight = 1;
+                row.Add(b);
+            }
+            Add("North", () => settings.heading.V = 0);
+            Add("East", () => settings.heading.V = 90);
+            Add("South", () => settings.heading.V = 180);
+            Add("West", () => settings.heading.V = 270);
+            Add("Polar", () => { if (PolarHeading(settings, out double h)) settings.heading.V = (float)h; });
 
             polar_hint = new Label();
             polar_hint.AddToClassList("k2-slider-value-label");
             polar_hint.style.whiteSpace = WhiteSpace.Normal;
-            polar.Add(polar_hint);
+            parent.Insert(index >= 0 ? index + 1 : parent.childCount, polar_hint);
         }
 
-        bool PolarHeading(LiftSettings settings, out double heading, out bool reachable)
+        // heading for a 90° orbit, northward, from this pad at the target altitude
+        bool PolarHeading(LiftSettings settings, out double heading)
         {
             heading = 0;
-            reachable = false;
             var vessel = FidoPlugin.Instance.current_vessel?.VesselComponent;
             var body = vessel?.mainBody;
             if (body == null) return false;
@@ -129,15 +138,18 @@ namespace Fido.Lift
             double orbit_speed = Fido.Constellation.OrbitMath.CircularSpeed(body.gravParameter,
                 body.radius + settings.destination_Ap_km.V * 1000.0);
             double surface_speed = Fido.Constellation.OrbitMath.EquatorialSurfaceSpeed(body);
-            reachable = Fido.Constellation.OrbitMath.LaunchHeading(settings.polar_inclination.V, vessel.Latitude,
-                orbit_speed, surface_speed, !settings.polar_south.V, out heading);
+            Fido.Constellation.OrbitMath.LaunchHeading(90, vessel.Latitude, orbit_speed, surface_speed, true, out heading);
             return true;
         }
 
-        void ApplyPolarHeading(LiftSettings settings)
+        // navball-style name for a heading: North, North-east, ... (within 2° of a cardinal = that name)
+        static string HeadingName(float h)
         {
-            if (PolarHeading(settings, out double heading, out _))
-                settings.heading.V = (float)heading;
+            h = ((h % 360) + 360) % 360;
+            string[] names = { "North", "North-east", "East", "South-east", "South", "South-west", "West", "North-west" };
+            foreach (var c in new[] { 0, 90, 180, 270, 360 })
+                if (System.Math.Abs(h - c) <= 2) return names[(c % 360) / 45];
+            return names[(int)System.Math.Round(h / 45) % 8];
         }
 
         void AddInfoRow(string label, string value)
@@ -176,15 +188,13 @@ namespace Fido.Lift
 
             LiftSettings settings = pilot.settings;
 
-            heading_label.text = $"{settings.heading.V:n1} °";
+            heading_label.text = $"{settings.heading.V:n1}° {HeadingName(settings.heading.V)}";
 
             if (polar_hint != null)
             {
-                if (PolarHeading(settings, out double polar_heading, out bool reachable))
-                    polar_hint.text = $"Heading {polar_heading:n1}° for {settings.polar_inclination.V:n1}° at {settings.destination_Ap_km.V} km" +
-                        (reachable ? "" : " (closest reachable from this latitude)");
-                else
-                    polar_hint.text = "";
+                polar_hint.text = PolarHeading(settings, out double polar_heading)
+                    ? $"Polar (90° orbit, going north) = heading {polar_heading:n1}° at {settings.destination_Ap_km.V} km"
+                    : "";
             }
 
             final_grp.Show(false);
