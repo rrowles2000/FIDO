@@ -119,14 +119,18 @@ namespace K2D2.Mission
             // Lift has moved on to Adjust / Circularize, which the Circularise step flies.
             if (lift.status == LiftPilot.LiftStatus.Adjust || lift.status == LiftPilot.LiftStatus.Circularize)
             {
+                // End the run through EndLiftPilot, not isRunning = false: that left result_ok false
+                // and end_status empty, so the flight result was logged as "stopped by hand" and
+                // scored as a failed training flight (-1000) although the Launch step succeeded.
                 string problem = lift.Stage1?.problem;
-                lift.isRunning = false;
                 if (!string.IsNullOrEmpty(problem))
                 {
+                    lift.EndLiftPilot(false, problem);
                     status = problem;
                     return StepResult.Failed;
                 }
                 status = started_disposal ? "Stage 1 separated" : "Above the atmosphere";
+                lift.EndLiftPilot(true, status);
                 return StepResult.Done;
             }
             return StepResult.Running;
@@ -329,8 +333,13 @@ namespace K2D2.Mission
                 status = NodeExPilot.Instance.ApiStatus();
                 return StepResult.Running;
             }
-            status = "Node executed";
-            return StepResult.Done;
+            if (NodeExPilot.Instance.burn_completed)
+            {
+                status = "Node executed";
+                return StepResult.Done;
+            }
+            status = "Node pilot stopped before the burn finished";
+            return StepResult.Paused;
         }
 
         public override void Stop()

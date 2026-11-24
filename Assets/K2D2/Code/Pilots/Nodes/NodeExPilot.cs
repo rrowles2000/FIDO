@@ -78,6 +78,10 @@ namespace K2D2.Node
 
         public Mode mode = Mode.Off;
 
+        // true once the last run's burn finished; false if it was stopped (by hand, by another
+        // pilot starting, or by a vessel switch) - the Mission Execute-node step needs the difference
+        public bool burn_completed;
+
         public void setMode(Mode mode)
         {
             if (mode == this.mode)
@@ -161,6 +165,7 @@ namespace K2D2.Node
                 maneuver_creator.Update();
                 maneuver_creator.RemoveNode(execute_node);
 
+                burn_completed = true;
                 Stop();
                 if (settings.pause_on_end.V)
                     TimeWarpTools.SetIsPaused(true);
@@ -442,6 +447,7 @@ namespace K2D2.Node
                     // reset controller to desactivate other controllers.
                     K2D2_Plugin.ResetControllers();
                     TimeWarpTools.SetIsPaused(false);
+                    burn_completed = false;
                 
                     setMode(Mode.Turn);
                 }

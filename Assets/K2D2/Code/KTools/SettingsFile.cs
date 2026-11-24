@@ -120,14 +120,12 @@ namespace KTools
             this.file_path = file_path;
             var previous_culture = Thread.CurrentThread.CurrentCulture;
             Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
-            try
-            {
-                this.data = JsonConvert.DeserializeObject<Dictionary<string, string>>(File.ReadAllText(file_path));
-            }
-            catch (System.Exception)
-            {
-                Debug.LogWarning($"error loading {file_path}");
-            }
+            // .bak fallback, and an unreadable file is copied aside before the next save replaces it
+            if (SafeFile.TryRead(file_path, t => JsonConvert.DeserializeObject<Dictionary<string, string>>(t),
+                                 out var read, w => Debug.LogWarning("[Settings] " + w)))
+                this.data = read;
+            else if (File.Exists(file_path))
+                Debug.LogWarning($"error loading {file_path} - using defaults");
 
             Thread.CurrentThread.CurrentCulture = previous_culture;
             loaded = true;
@@ -155,7 +153,7 @@ namespace KTools
             Thread.CurrentThread.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
             try
             {
-                File.WriteAllText(file_path, JsonConvert.SerializeObject(data));
+                SafeFile.Write(file_path, JsonConvert.SerializeObject(data));
             }
             catch (System.Exception)
             {

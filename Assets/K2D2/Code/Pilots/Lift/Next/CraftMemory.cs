@@ -103,15 +103,12 @@ namespace K2D2.Lift.Next
         static Dictionary<string, Record> All()
         {
             if (records != null) return records;
-            try
+            // falls back to the .bak, and keeps a copy of an unreadable file, so starting empty here
+            // can't lead to the next Save wiping what was learned
+            if (!KTools.SafeFile.TryRead(FilePath, t => JsonConvert.DeserializeObject<Dictionary<string, Record>>(t),
+                                         out records, w => logger.LogWarning("[Memory] " + w)))
             {
-                records = File.Exists(FilePath)
-                    ? JsonConvert.DeserializeObject<Dictionary<string, Record>>(File.ReadAllText(FilePath)) ?? new()
-                    : new();
-            }
-            catch (Exception e)
-            {
-                logger.LogWarning($"[Memory] couldn't read {FilePath}: {e.Message} - starting empty");
+                if (File.Exists(FilePath)) logger.LogWarning($"[Memory] couldn't read {FilePath} or its backup - starting empty");
                 records = new();
             }
             return records;
@@ -119,7 +116,7 @@ namespace K2D2.Lift.Next
 
         static void Save()
         {
-            try { File.WriteAllText(FilePath, JsonConvert.SerializeObject(records, Formatting.Indented)); }
+            try { KTools.SafeFile.Write(FilePath, JsonConvert.SerializeObject(records, Formatting.Indented)); }
             catch (Exception e) { logger.LogWarning($"[Memory] couldn't write {FilePath}: {e.Message}"); }
         }
 

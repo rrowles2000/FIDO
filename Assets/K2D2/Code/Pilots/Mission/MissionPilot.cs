@@ -24,6 +24,9 @@ namespace K2D2.Mission
         PlanHolder holder;
         VesselComponent bound_vessel;
         int bound_parts = -1;
+        // every part seen on the bound vessel since it was bound: a vessel made only of these
+        // parts came from it by staging or decoupling, so the plan may follow it
+        readonly HashSet<string> bound_part_ids = new HashSet<string>();
 
         StepRunner runner;
         int runner_index = -1;
@@ -49,8 +52,8 @@ namespace K2D2.Mission
         void Bind(VesselComponent vessel)
         {
             bool same_vessel = vessel == bound_vessel;
-            bound_vessel = vessel;
-            bound_parts = PartCount(vessel);
+            if (!same_vessel) bound_part_ids.Clear();
+            BindTo(vessel);
             var old_holder = holder;
             holder = MissionStore.Find(vessel, out bool has_plan);
             if (!has_plan && same_vessel && plan != null)
@@ -75,6 +78,39 @@ namespace K2D2.Mission
         }
 
         static int PartCount(VesselComponent vessel) => vessel?.SimulationObject?.PartOwner?.Parts?.Count() ?? -1;
+
+        static IEnumerable<string> PartIds(VesselComponent vessel)
+        {
+            var parts = vessel?.SimulationObject?.PartOwner?.Parts;
+            if (parts == null) yield break;
+            foreach (var p in parts)
+            {
+                var so = p?.SimulationObject;
+                if (so != null) yield return so.GlobalId.ToString();
+            }
+        }
+
+        void BindTo(VesselComponent vessel)
+        {
+            bound_vessel = vessel;
+            bound_parts = PartCount(vessel);
+            foreach (var id in PartIds(vessel)) bound_part_ids.Add(id);
+        }
+
+        /// <summary>True if <paramref name="vessel"/> is the bound vessel or was split off it (all its parts were on it).</summary>
+        bool CameFromBound(VesselComponent vessel)
+        {
+            if (vessel == null) return false;
+            if (vessel == bound_vessel) return true;
+            if (bound_part_ids.Count == 0) return false;
+            int n = 0;
+            foreach (var id in PartIds(vessel))
+            {
+                if (!bound_part_ids.Contains(id)) return false;
+                n++;
+            }
+            return n > 0;
+        }
 
         void Save()
         {
@@ -300,9 +336,16 @@ namespace K2D2.Mission
                     step.state = "done";
                     logger.LogInfo($"[Mission] step {plan.current + 1} done: {note}");
                     plan.current++;
-                    holder = MissionStore.Rehome(holder, plan, K2D2_Plugin.Instance.current_vessel?.VesselComponent);
-                    bound_vessel = K2D2_Plugin.Instance.current_vessel?.VesselComponent;
-                    bound_parts = PartCount(bound_vessel);
+                    var active = K2D2_Plugin.Instance.current_vessel?.VesselComponent;
+                    // only follow a vessel that came off the bound one (stage 1 dropping the plan's
+                    // probe core); never move the plan onto an unrelated vessel
+                    if (CameFromBound(active))
+                    {
+                        holder = MissionStore.Rehome(holder, plan, active);
+                        BindTo(active);
+                    }
+                    else
+                        logger.LogWarning($"[Mission] active vessel {active?.Name} is not the mission's vessel - the plan stays on {bound_vessel?.Name}");
                     Next(true);
                     return;
                 case StepResult.Paused:
@@ -434,6 +477,23 @@ namespace K2D2.Mission
                 Bind(vessel);
 
             if (!isRunning || runner == null) return;
+
+            // a running mission was switched away from (by hand, or the game after a crash): pause
+            // before the runner sees its pilot stopped by the switch and calls the step done
+            if (vessel != null && vessel != bound_vessel)
+            {
+                if (CameFromBound(vessel))
+                    BindTo(vessel);
+                else
+                {
+                    runner.Stop();
+                    Complete(StepResult.Paused, $"vessel switched to {vessel.Name} - switch back to {bound_vessel?.Name} and press Go");
+                    return;
+                }
+            }
+            else if (vessel == bound_vessel && PartCount(vessel) != bound_parts)
+                BindTo(vessel);
+
             StepResult result;
             try { result = runner.Update(); }
             catch (Exception e)
