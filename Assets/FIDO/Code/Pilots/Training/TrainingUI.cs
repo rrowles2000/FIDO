@@ -78,6 +78,9 @@ namespace Fido.Training
             page.Add(run_button);
 
             // VRAM after reverts (notes/20261123-211500_bug_gpu-hang-after-reverts.md)
+            var unload_before = new K2Toggle("Unload unused assets before each revert");
+            unload_before.Bind(pilot.unload_before_revert);
+            page.Add(unload_before);
             var unload = new K2Toggle("Unload unused assets after each revert");
             unload.Bind(pilot.unload_on_revert);
             page.Add(unload);

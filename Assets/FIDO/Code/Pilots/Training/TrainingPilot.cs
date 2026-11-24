@@ -29,6 +29,11 @@ namespace Fido.Training
         // pad; the census logs what is loaded / grew / was freed (KTools.AssetCensus, FIDO.Census).
         public Setting<bool> unload_on_revert = new("training.unload_on_revert", true);
         public Setting<bool> asset_census = new("training.asset_census", true);
+        // 2026-11-24 later: with the unload after the revert the settled VRAM stays flat, but the
+        // revert itself still peaks at 11.7-11.8 of 12 GB (new scene loads while the old one is
+        // held). Unloading what the flight already dropped (staged debris, terrain it flew over)
+        // before reverting lowers the base that peak starts from.
+        public Setting<bool> unload_before_revert = new("training.unload_before_revert", true);
 
         // 2026-11-14: the game froze on the 7th flight in a row, then crashed in d3d11 (DXVK)
         // reloading the scene after the 4th revert - sessions are capped at the most that has
@@ -40,7 +45,7 @@ namespace Fido.Training
         public const int MaxFailsInARow = 3;
         const float PadSettleSeconds = 5, ResultPauseSeconds = 3, RevertTimeoutSeconds = 120, UnloadTimeoutSeconds = 60;
 
-        public enum Phase { Idle, WaitPad, Unloading, Flying, Pause, Reverting }
+        public enum Phase { Idle, WaitPad, Unloading, Flying, Pause, UnloadingBeforeRevert, Reverting }
         public Phase phase { get; private set; } = Phase.Idle;
 
         public int done, ok_count, fails_in_a_row, target;
@@ -55,6 +60,7 @@ namespace Fido.Training
         AsyncOperation unload_op;
         AssetCensus.Snapshot unload_before;
         float unload_started;
+        string unload_tag;
 
         public TrainingPilot()
         {
@@ -186,9 +192,13 @@ namespace Fido.Training
 
                 case Phase.Pause:
                     if (t < ResultPauseSeconds) return;
-                    if (!Revert()) { Stop("Revert failed - stopped"); return; }
-                    phase = Phase.Reverting;
-                    phase_time = Time.unscaledTime;
+                    if (unload_before_revert.V) { BeginUnload(before_revert: true); return; }
+                    DoRevert();
+                    break;
+
+                case Phase.UnloadingBeforeRevert:
+                    if (!UnloadDone(t)) return;
+                    DoRevert();
                     break;
 
                 case Phase.Reverting:
@@ -207,33 +217,48 @@ namespace Fido.Training
                     if (vessel == null || !vessel.Landed) { phase_time = Time.unscaledTime; return; }
                     SetStatus($"Flight {done + 1} of {target}: settling on the pad", true);
                     if (t < PadSettleSeconds) return;
-                    if (unload_on_revert.V && !unloaded_this_revert) { BeginUnload(); return; }
+                    if (unload_on_revert.V && !unloaded_this_revert) { BeginUnload(before_revert: false); return; }
                     StartFlight();
                     break;
                 }
 
                 case Phase.Unloading:
-                    if (unload_op != null && !unload_op.isDone && t < UnloadTimeoutSeconds) return;
-                    if (unload_op != null && !unload_op.isDone)
-                        logger.LogWarning($"[Training] unload still running after {UnloadTimeoutSeconds} s - launching anyway");
-                    AssetCensus.Finish($"after revert {done}", unload_started, unload_before, asset_census.V);
-                    unload_op = null;
-                    unload_before = null;
+                    if (!UnloadDone(t)) return;
                     phase = Phase.WaitPad;
                     phase_time = Time.unscaledTime - PadSettleSeconds;  // settled already
                     break;
             }
         }
 
-        void BeginUnload()
+        void DoRevert()
         {
-            unloaded_this_revert = true;
-            string tag = $"after revert {done}";
-            SetStatus($"Flight {done + 1} of {target}: unloading the last flight's assets", true);
-            unload_before = asset_census.V ? AssetCensus.Take(tag) : null;
+            if (!Revert()) { Stop("Revert failed - stopped"); return; }
+            phase = Phase.Reverting;
+            phase_time = Time.unscaledTime;
+        }
+
+        // true once the running unload has finished (or timed out) and been logged
+        bool UnloadDone(float t)
+        {
+            if (unload_op != null && !unload_op.isDone && t < UnloadTimeoutSeconds) return false;
+            if (unload_op != null && !unload_op.isDone)
+                logger.LogWarning($"[Training] unload still running after {UnloadTimeoutSeconds} s - going on anyway");
+            AssetCensus.Finish(unload_tag, unload_started, unload_before, asset_census.V);
+            unload_op = null;
+            unload_before = null;
+            return true;
+        }
+
+        void BeginUnload(bool before_revert)
+        {
+            if (!before_revert) unloaded_this_revert = true;
+            unload_tag = before_revert ? $"before revert {done}" : $"after revert {done}";
+            SetStatus(before_revert ? $"Flight {done} over: unloading unused assets before reverting"
+                                    : $"Flight {done + 1} of {target}: unloading the last flight's assets", true);
+            unload_before = asset_census.V ? AssetCensus.Take(unload_tag) : null;
             unload_started = Time.realtimeSinceStartup;
-            unload_op = AssetCensus.StartUnload(tag);
-            phase = Phase.Unloading;
+            unload_op = AssetCensus.StartUnload(unload_tag);
+            phase = before_revert ? Phase.UnloadingBeforeRevert : Phase.Unloading;
             phase_time = Time.unscaledTime;
         }
 
