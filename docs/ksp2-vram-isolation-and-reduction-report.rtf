@@ -1,0 +1,623 @@
+{\rtf1\ansi\ansicpg1252\deff0
+{\fonttbl
+{\f0\fswiss\fcharset0 Helvetica;}
+{\f1\fmodern\fcharset0 Courier New;}
+}
+{\colortbl;\red0\green0\blue0;\red44\green62\blue80;\red231\green76\blue60;\red39\green174\blue96;\red41\green128\blue185;\red142\green68\blue173;\red127\green140\blue141;\red243\green156\blue18;\red255\green255\blue255;\red236\green240\blue241;}
+\paperw12240\paperh15840\margl1440\margr1440\margt1440\margb1440
+
+{\pard\qc\sb0\sa480\sl360\slmult1
+{\b\f0\fs48\cf2 KSP2 Redux VRAM: Isolating the Revert Crash and Options to Reduce GPU Memory\line}
+{\f0\fs28\cf2 How the GPU hang after Training reverts was narrowed down, what is fixed, and which modern VRAM-reduction methods fit this game and engine\line}
+{\f0\fs24\cf7 Generated: 24 November 2026\line}
+{\f0\fs24\cf7 Author: Richard | Project: KSP / ksp2-redux\par}
+}
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 Table of Contents\par}
+}
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1
+1.\tab Executive Summary\line
+2.\tab Problem & Environment\line
+\tab 2.1.\tab Symptom\line
+\tab 2.2.\tab System & Game Build\line
+3.\tab Isolation Methodology\line
+\tab 3.1.\tab Approach\line
+\tab 3.2.\tab Step-by-Step Record\line
+\tab 3.3.\tab Instruments Built\line
+\tab 3.4.\tab Lessons on Method\line
+4.\tab Findings: Where the VRAM Goes\line
+\tab 4.1.\tab Settled vs Load Peak\line
+\tab 4.2.\tab Approximate Budget\line
+\tab 4.3.\tab What Is Fixed and What Is Open\line
+5.\tab Modern VRAM-Reduction Methods\line
+\tab 5.1.\tab Engine Constraints That Decide Fit\line
+\tab 5.2.\tab Method-by-Method Assessment\line
+\tab 5.3.\tab Methods That Do Not Fit\line
+6.\tab Recommendation & Test Plan\line
+7.\tab Sources & Evidence\par}
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+\page
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 1. Executive Summary\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1 Training sessions crashed or hung the GPU {\b loading the 3rd flight after 2 reverts}, every time (4 occurrences, 2026-11-23 to 2026-11-24). Measurement showed two separate problems: a {\b per-revert VRAM retention} (worst on polar flights, +0.65-0.9 GB per revert) and a {\b scene-load transient} of about {\b 2 GB above the settled level}, which takes the 12 GB card to {\b 11.6-11.8 GB} on every flight load.\par}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1
+\bullet\tab {\b Retention is fixed.} A forced GC + Resources.UnloadUnusedAssets() after each revert (FIDO 7a2bff7) stopped the creep: 5/5 polar flights, settled VRAM 9.4-9.7 GB, no crash (before: crash on flight 3 every time).\line
+\bullet\tab {\b The load peak is not overlap of old and new scenes.} An extra unload before the revert (FIDO 0432be3) freed no GPU memory; VRAM fell to 7.2 GB before the new load and still peaked at 11.76 GB. The first load from the main menu (from 1.2 GB) also peaked at 11.58 GB. The before-revert unload is now off by default (FIDO 8236fcb).\line
+\bullet\tab {\b Margin is about 0.4-0.5 GB.} On Linux the NVIDIA driver does not page VRAM out to system memory the way Windows does, so going over the limit tends to crash or hang rather than slow down.\line
+\bullet\tab {\b Best fits for the installed stable build (Unity 6000.4.1f1, Built-in pipeline, D3D11 via DXVK):} free desktop VRAM (0.5-0.7 GB), Texture Quality one step down, then cloud/shadow resolution or render scale. Engine-level modern methods (render-graph aliasing, temporal upscalers, GPU-driven rendering) need the Redux URP/D3D12 beta line, not this build.\par}
+
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+\page
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 2. Problem & Environment\par}
+}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 2.1 Symptom\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1 FIDO's Training tab flies a set of launches back to back, using Revert to Launch between them. Flights 1 and 2 reached orbit; loading flight 3 failed in one of three ways:\par}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx3120\clcbpat10\cellx6240\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 When}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Failure}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Evidence}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 2026-11-23 21:07}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 GPU hang, window killed}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Kernel NVRM Xid 109 CTX SWITCH TIMEOUT}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 2026-11-24 15:44}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Unity crash, d3d11 stack}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Crash_2026-11-24_154459854 (minidump)}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 2026-11-24 19:41}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Stall, log stops}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 No Xid; VRAM only ~6.7 GB}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 2026-11-24 20:00}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Unity crash, d3d11 stack}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Crash_2026-11-24_200024201; load at 11.56 GB}\cell}
+\row}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 2.2 System & Game Build\par}
+}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx4680\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Item}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Value}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 GPU}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 NVIDIA RTX 3060, 12,288 MiB, driver 580.178.04}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Game}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 KSP2 Redux stable 0.2.8.5.103184}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Engine}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Unity 6000.4.1f1, Built-in Render Pipeline + Post-processing v2}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Graphics API}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Direct3D 11.0 (level 11.1) via DXVK, Proton Experimental 11.0}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Resolution}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 2560x1440, render scale 100%}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Texture Quality}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 0 (full-size textures)}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Clouds / water / ground}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 CloudQuality 2, WaterQuality 2, GroundShadingQuality 2}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Shadows / reflections}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 All / High; ReflectionsQuality 0}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Desktop share of VRAM}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 ~0.5-0.7 GB (Xorg, gnome-shell, Firefox)}\cell}
+\row}
+
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+\page
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 3. Isolation Methodology\par}
+}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 3.1 Approach\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1 Each step stated a hypothesis, added the cheapest instrument that could reject it, and ran the same repeatable workload: a 5-flight Training session on the R2-1 launcher (equatorial, then polar). Results were written into the bug note (notes/20261123-211500_bug_gpu-hang-after-reverts.md) as they came in, so later steps could compare against earlier sessions on the same terms.\par}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 3.2 Step-by-Step Record\par}
+}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx2340\clcbpat10\cellx4680\clcbpat10\cellx7020\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 #}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Hypothesis}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Instrument / test}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Result}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 1}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Mod code causes the crash}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Read the crash stack, check what changed that day}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Stack entirely in d3d11 (DXVK); no managed or mod frames}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 2}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Memory leak per revert (CPU)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 PerfLog CSV: Unity allocated + mono}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Rejected: Unity ~4.0-4.14 GB flat, mono swings with GC}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 3}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 VRAM leak per revert}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Live view samples nvidia-smi every 5 s}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Steady 9.3-9.8 GB, flat; load peaks 11.1-11.4 GB}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 4}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 5 s samples hide the real top}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Sampler changed to 1 s}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Peaks 11.5-11.8 GB; small growth (~250-350 MB) over flights 1-3}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 5}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Polar flights retain more}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Polar Training session}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 +0.65-0.9 GB per revert vs +0.2-0.3 GB equatorial; crash at flight 3}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 6}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Unity never unloads at revert}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Search Player.log for 'Unloading N unused Assets'}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Confirmed: only at startup, never at a revert}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 7}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Forced unload fixes retention}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 GC + UnloadUnusedAssets after revert; AssetCensus logging}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Fixed: 5/5 polar, settled 9.4-9.7 GB, no crash}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 8}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Load peak is old+new overlap}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Also unload before the revert}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Rejected: freed 0 MB GPU; VRAM fell to 7.2 GB, still peaked 11.76 GB}\cell}
+\row}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 3.3 Instruments Built\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1
+\bullet\tab {\b VRAM sampler} in the live view server (tools/liveview): nvidia-smi every 1 s while KSP2_x64.exe runs, to logs/perf/vram-YYYYMMDD.csv, charted with Unity/mono memory and revert markers.\line
+\bullet\tab {\b AssetCensus} (FIDO KTools): counts and sizes by type, top growers between tagged points, and what each unload freed.\line
+\bullet\tab {\b Training toggles} for the after-revert and before-revert unloads, so each could be tested in or out of the run.\line
+\bullet\tab {\b ksplog}: archives Ksp2.log per session (the game overwrites it on start) and summarises flights.\par}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 3.4 Lessons on Method\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1
+\bullet\tab {\b Sample rate matters.} 5 s samples understated peaks by up to ~0.4 GB; transient problems need 1 s or better.\line
+\bullet\tab {\b Separate 'settled' from 'peak'.} A flat settled level looked like 'no leak' while the peak was the real risk; the same chart read by eye looked like a leak when the growth was small.\line
+\bullet\tab {\b Compare against a clean baseline.} The first load from the main menu (from 1.2 GB) was the control that showed the peak is the load's own cost, not something left over from the previous flight.\line
+\bullet\tab {\b Use the engine's own counters with care.} The census's texture total (~22 GB) is an RGBA32 estimate because the release player reports 0 for Profiler sizes; Texture.currentTextureMemory (3.7-4.1 GB) is the reliable figure.\line
+\bullet\tab {\b One stall is still unexplained.} The 19:41 stall happened at only 6.7 GB, so not every failure is VRAM exhaustion.\par}
+
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+\page
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 4. Findings: Where the VRAM Goes\par}
+}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 4.1 Settled vs Load Peak\par}
+}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx2340\clcbpat10\cellx4680\clcbpat10\cellx7020\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Session}\cell}
+{\pard\intbl\sb40\sa40\qr{\b\f0\fs20 Settled in flight (GB)}\cell}
+{\pard\intbl\sb40\sa40\qr{\b\f0\fs20 Load peak (GB)}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Outcome}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 15:51 equatorial, 5 s}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 9.39-9.62}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 11.10-11.37}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 5/5, no crash}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 18:16 equatorial, 5 s}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 9.43-9.70}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 11.21-11.56}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 5/5, no crash}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 19:48 polar, 1 s, no unload}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 9.36 then 10.03-10.36}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 11.56}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Crash loading flight 3}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 20:12 polar, after-revert unload}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 9.38-9.66}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 11.58-11.83}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 5/5, no crash}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 20:47 polar, + before-revert unload}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 9.52-9.78}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 11.58 / 11.76}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 1 flight + revert, no crash}\cell}
+\row}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 4.2 Approximate Budget\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf7 Approximate split of the ~9.5 GB settled level. Only the texture figure is a direct engine counter; the rest are estimates or the remainder, and are shown as such.\par}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx3120\clcbpat10\cellx6240\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Component}\cell}
+{\pard\intbl\sb40\sa40\qr{\b\f0\fs20 Size}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Basis}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Textures}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 3.7-4.1 GB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Texture.currentTextureMemory (measured)}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Render targets}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 ~1.4-1.7 GB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 AssetCensus estimate (147 render textures); scales with resolution}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Desktop (other processes)}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 0.5-0.7 GB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 nvidia-smi with the game closed}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Meshes, buffers, DXVK/driver overhead, terrain}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 ~3 GB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Remainder (not sized by the census)}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Load transient}\cell}
+{\pard\intbl\sb40\sa40\qr{\f0\fs20 +~2 GB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Peak minus settled; present from a clean start too}\cell}
+\row}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1 The biggest render targets that grow during a flight are cloud and god-ray buffers (about 53 MB each: LowResFinalSceneColor, GodrayBlurBuffer, Previous/NewCloudLayerRaysColorBuffer) and GrabPass Temp (28 MB). These depend on resolution and cloud quality.\par}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 4.3 What Is Fixed and What Is Open\par}
+}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx3120\clcbpat10\cellx6240\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Issue}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Status}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Notes}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Per-revert retention (polar +0.65-0.9 GB)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Fixed}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 FIDO 7a2bff7 after-revert unload; default on}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Old/new scene overlap at revert}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Not the cause}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Before-revert unload freed 0 MB GPU; now off (8236fcb)}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Load transient ~2 GB, peak 11.6-11.8 of 12 GB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Open}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Margin ~0.4-0.5 GB; needs a lower footprint}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 19:41 stall at 6.7 GB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Open}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Not explained by VRAM}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Big scenes (stations, docking, many vessels)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Untested}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Same retention may build up outside Training}\cell}
+\row}
+
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+\page
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 5. Modern VRAM-Reduction Methods\par}
+}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 5.1 Engine Constraints That Decide Fit\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1
+\bullet\tab {\b Unity 6 engine, older renderer.} The engine is current (6000.4.1f1), but the installed build uses the Built-in Render Pipeline with Post-processing v2. Most of Unity 6's memory-saving rendering features (render graph with resource aliasing, STP upscaling, GPU Resident Drawer) belong to URP/HDRP only.\line
+\bullet\tab {\b Assets are baked.} Texture formats, mip chains and per-texture flags (such as mipmap streaming) are set when the game is built. A mod can change runtime settings, not re-import assets.\line
+\bullet\tab {\b D3D11 under DXVK.} Memory is managed by DXVK on top of Vulkan. Proton Experimental 11.0 ships DXVK newer than 2.5, whose rewritten memory manager defragments and returns unused memory (reported up to 1 GiB lower peaks in one title).\line
+\bullet\tab {\b Linux NVIDIA driver.} Forum reports describe no Windows-style 'shared GPU memory' spill-over: going past VRAM tends to fail allocations, crash or hang. This matches what we saw and is why headroom matters more here.\line
+\bullet\tab {\b Redux beta line differs.} Per the earlier GPU Resident Drawer report, Redux beta 26w42a moved to URP with Deferred+ and D3D12, and snapshot 0.2.9.0.108007 lists VRAM leak fixes. Methods marked 'beta only' need that move.\par}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 5.2 Method-by-Method Assessment\par}
+}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx2340\clcbpat10\cellx4680\clcbpat10\cellx7020\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Method (modern practice)}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Fit on stable build}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Expected effect}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Effort}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Free VRAM held by other apps (close browser / disable its GPU acceleration)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Full}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 0.5-0.7 GB headroom}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 None}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Texture resolution cap (global mip limit; Texture Quality setting)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Full: TextureQuality 0 -> 1}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Textures ~4 GB -> roughly 1-1.5 GB if most are affected}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Setting}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Lower-resolution effect buffers (clouds, shadows)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Full: CloudQuality, ShadowResolution}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Tens to a few hundred MB}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Setting}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Render scale below 100% (modern games pair this with a temporal upscaler)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Partial: RenderScalePercent exists; no DLSS/FSR/STP in Built-in}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Render targets scale with pixel count (85% ~ -28%)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Setting; softer image}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Explicit unload at scene transitions}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Done (after-revert unload)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Stopped the per-revert creep}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Done}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Mipmap streaming with a memory budget}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Unknown: only for textures built with streaming on}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Could cap texture memory with no visible loss far away}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Check flags in census; set budget at runtime}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Smoothing load spikes (async upload ring buffer size, non-persistent buffer)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Settable at runtime (QualitySettings)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Unknown; buffer may sit in system memory under DXVK}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Small mod change + test}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Budget-aware loading (query budget, pause/defer when near the limit)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Mod-side only}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Avoids crash, does not reduce use}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Small: e.g. Training waits or warns}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Newer translation layer / API (DXVK updates, D3D12 via vkd3d-proton)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Test only: D3D12 path not verified on this build}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Unknown; could help or hurt}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Launch option test}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx2340\cellx4680\cellx7020\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Cap reported VRAM (DXVK dxgi.maxDeviceMemory)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Low value: Unity rarely scales with reported VRAM}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Little or none}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Config}\cell}
+\row}
+
+{\pard\sb120\sa60\sl360\slmult1
+{\b\f0\fs28\cf5 5.3 Methods That Do Not Fit\par}
+}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx4680\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Method}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Why not here}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Render-graph resource aliasing (transient render targets share memory)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 URP/HDRP only; beta line}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Temporal upscalers (DLSS, FSR 2/3, Unity STP)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Not wired into Built-in; beta line or a large mod}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Streaming virtual texturing / sparse textures}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 HDRP feature, needs assets authored for it}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Re-compressing textures (BC7/ASTC re-encode)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Assets are baked into bundles; would need a repack tool}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 Mesh LOD / meshlet streaming / GPU-driven culling}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Mostly CPU/bandwidth wins; GRD needs URP}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx4680\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 DirectStorage / GPU decompression}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Not in Unity 6 Built-in; aimed at load speed, not peak memory}\cell}
+\row}
+
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+\page
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 6. Recommendation & Test Plan\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1 In order of cost and expected payoff. Each test uses the same 5-flight polar Training and the 1 s sampler.\par}
+
+{\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\clcbpat10\cellx3120\clcbpat10\cellx6240\clcbpat10\cellx9360
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Step}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Change}\cell}
+{\pard\intbl\sb40\sa40{\b\f0\fs20 Pass if}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 1}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Close Firefox (or turn off its hardware acceleration) during sessions}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Baseline drops ~0.5 GB}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 2}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 TextureQuality 0 -> 1 (one step down)}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Load peak under ~10.5 GB; 5/5 flights}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 3}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 If needed: CloudQuality and ShadowResolution one step down}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Peak under ~10 GB}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 4}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Census: count textures with streaming mips on}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Decides whether a streaming budget is worth adding}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 5}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Try async upload buffer settings via FIDO}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Load transient smaller than ~2 GB}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 6}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Optional: Training waits or warns before a revert when settled VRAM is high}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 No crash even when near the limit}\cell}
+\row
+\trowd\trbrdrh\brdrs\brdrw10\trbrdrv\brdrs\brdrw10\trbrdrt\brdrs\brdrw10\trbrdrb\brdrs\brdrw10\trbrdrl\brdrs\brdrw10\trbrdrr\brdrs\brdrw10
+\cellx3120\cellx6240\cellx9360
+{\pard\intbl\sb40\sa40{\f0\fs20 7}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 Later: big-scene test (station, docking) with census before and after}\cell}
+{\pard\intbl\sb40\sa40{\f0\fs20 No unbounded growth}\cell}
+\row}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1 Longer term, the Redux URP/D3D12 beta line is where the modern engine-level methods become available; that move is the subject of the separate GPU Resident Drawer proposal report and needs FIDO and the other mods rebuilt.\par}
+
+{\pard\brdrb\brdrs\brdrw20\brsp40\cf5\sb0\sa200\sl360\slmult1\par}
+
+\page
+
+{\pard\sb200\sa120\sl360\slmult1
+{\b\f0\fs36\cf2 7. Sources & Evidence\par}
+}
+
+{\pard\sb60\sa60\sl360\slmult1\f0\fs22\cf1
+\bullet\tab Bug note: ksp2-redux/notes/20261123-211500_bug_gpu-hang-after-reverts.md\line
+\bullet\tab Game logs: ksp2-redux/logs/Ksp2-20261124-153452.log, -155146, -193043, -194816, -201229, -204759\line
+\bullet\tab VRAM samples: ksp2-redux/logs/perf/vram-20261124.csv; PerfLog CSVs in logs/perf/\line
+\bullet\tab Crash reports: Crash_2026-11-24_154459854, Crash_2026-11-24_200024201 (Proton prefix Temp folder)\line
+\bullet\tab FIDO commits (branch redux-stable-0.2.8.5, not pushed): 7a2bff7 after-revert unload, 0432be3 before-revert unload, 8236fcb before-revert off by default\line
+\bullet\tab Earlier report: KSP/reports/ksp2-redux-gpu-resident-drawer-proposal-report.rtf (Redux beta URP/D3D12 move)\line
+\bullet\tab DXVK 2.5 memory rework: gamingonlinux.com/2024/11/direct3d-to-vulkan-translation-layer-dxvk-v25-released-with-rewritten-memory-management\line
+\bullet\tab NVIDIA Linux VRAM spill-over reports: forums.developer.nvidia.com/t/non-existent-shared-vram-on-nvidia-linux-drivers/260304\line
+\bullet\tab Unity async upload pipeline: docs.unity.com (6000.3) configure-asynchronous-upload-pipeline; QualitySettings.asyncUploadPersistentBuffer\par}
+
+}
