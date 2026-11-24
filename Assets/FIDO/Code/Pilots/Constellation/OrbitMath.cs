@@ -117,6 +117,25 @@ namespace Fido.Constellation
             return reachable;
         }
 
+        /// <summary>
+        /// The orbit inclination a launch heading (navball degrees) aims for, the inverse of
+        /// LaunchHeading: the inclination whose launch heading from this latitude is closest to
+        /// <paramref name="headingDeg"/>. North-going headings (cos > 0) search northward launches,
+        /// the rest southward. 90° (east) gives the latitude, i.e. the lowest inclination reachable.
+        /// </summary>
+        public static double InclinationForHeading(double headingDeg, double latitudeDeg, double orbitSpeed, double surfaceSpeed)
+        {
+            bool northward = Math.Cos(headingDeg * Math.PI / 180.0) >= 0;
+            double best = 0, best_err = double.MaxValue;
+            for (double inc = 0; inc <= 180.0001; inc += 0.05)
+            {
+                LaunchHeading(inc, latitudeDeg, orbitSpeed, surfaceSpeed, northward, out double h);
+                double err = Math.Abs(((h - headingDeg) % 360 + 540) % 360 - 180);
+                if (err < best_err) { best_err = err; best = inc; }
+            }
+            return best;
+        }
+
         /// <summary>Surface rotation speed at the equator (m/s), signed for inverse rotation.</summary>
         public static double EquatorialSurfaceSpeed(CelestialBodyComponent body)
         {

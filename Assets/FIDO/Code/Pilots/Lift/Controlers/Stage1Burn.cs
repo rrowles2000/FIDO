@@ -1,3 +1,4 @@
+using System.Linq;
 using KSP.Modules;
 using KSP.Sim.impl;
 using KSP.Sim.Maneuver;
@@ -25,7 +26,7 @@ namespace Fido.Lift
         KSPVessel current_vessel;
         LiftPilot lift;
 
-        public enum Mode { Settle, Turn, Warp, Burn, Separate, Ignite }
+        public enum Mode { Settle, Verify, Turn, Warp, Burn, Separate, Ignite }
         public Mode mode;
         TurnTo turn = new TurnTo();
         WarpTo warp = new WarpTo();
@@ -42,6 +43,18 @@ namespace Fido.Lift
         string status_line = "";
         // set when the run ends needing the player (the upper engine wouldn't light safely)
         public string problem;
+
+        // PLANE: the node also turns the orbit into the plane the launch heading aims for. The climb
+        // only flies the heading until cut-off (~700 m/s across the ground on R2-1), so the planet's
+        // spin is mostly still in the velocity and a prograde node keeps that plane: Polar (355.6°)
+        // gave 80.3° on 2026-11-24. Turning at apoapsis, while the speed is still low, costs little
+        // (~16 m/s extra on a 1,474 m/s burn for Polar from R2-1). The game's node "normal" sign is
+        // learned from its own prediction (as ConstellationPilot.polar_normal_sign).
+        static double normal_sign = 1;
+        const double PlaneDeadbandDeg = 0.3, PlaneMaxTurnDeg = 20;
+        double plan_UT, plan_prograde, plan_normal_zup, target_inc = double.NaN, inc_before;
+        int verify_tries;
+        float verify_since;
 
         // Small margin under stage 1's modelled Δv. It was 3% (~36 m/s) so a dry stage couldn't
         // leave the burn hanging, but on 2026-11-14 (83 t) that left the node 22 m/s short of the
@@ -162,14 +175,117 @@ namespace Fido.Lift
                 return;
             }
             status_line = $"Stage 1 apoapsis burn: {dv:n0} m/s";
+            plan_UT = burn_UT;
+            plan_prograde = dv;
+            plan_normal_zup = 0;
+            inc_before = orbit.inclination;
+            verify_tries = 0;
+            if (PlaneCorrection(orbit, body, burn_UT, dv, out double pro, out double nrm, out double turn_deg))
+            {
+                plan_prograde = pro;
+                plan_normal_zup = nrm;
+                logger.LogInfo($"[Stage1Burn] plane: heading {lift_settings.heading.V:n1}° aims for inc {target_inc:n2}° " +
+                               $"(now {inc_before:n2}°) - turn {turn_deg:+0.00;-0.00}° at Ap: prograde {pro:n1} m/s, normal {nrm:n1} m/s " +
+                               $"(total {System.Math.Sqrt(pro * pro + nrm * nrm):n1} vs {dv:n1} prograde only)");
+            }
+            PlaceNode();
+        }
+
+        void PlaceNode()
+        {
             maneuver_creator.Update();
-            maneuver_creator.RemoveAllNodesThenCreate(burn_UT, dv, created_node =>
+            maneuver_creator.RemoveAllNodesThenCreate(plan_UT, plan_prograde, created_node =>
             {
                 node = created_node;
-                mode = Mode.Turn;
-                current_executor.setController(turn);
-                turn.StartManeuver(node);
-            });
+                if (plan_normal_zup != 0)
+                {
+                    mode = Mode.Verify;  // check the game's prediction before turning onto it
+                    verify_since = UnityEngine.Time.unscaledTime;
+                    return;
+                }
+                StartTurn();
+            }, normal_sign * plan_normal_zup);
+        }
+
+        void StartTurn()
+        {
+            mode = Mode.Turn;
+            current_executor.setController(turn);
+            turn.StartManeuver(node);
+        }
+
+        // Prograde and normal (Zup orbit-normal r x v) parts of the apoapsis node that leave the
+        // horizontal velocity at |v_h| + dv in the target plane's direction at that point. False
+        // when there is nothing to correct (no launch latitude, within the deadband).
+        bool PlaneCorrection(PatchedConicsOrbit orbit, CelestialBodyComponent body, double ut, double dv,
+                             out double prograde, out double normal_zup, out double turn_deg)
+        {
+            prograde = dv; normal_zup = 0; turn_deg = 0;
+            target_inc = double.NaN;
+            if (double.IsNaN(lift.launch_latitude)) return false;
+            const double deg = System.Math.PI / 180.0;
+            double v_orbit = Fido.Constellation.OrbitMath.CircularSpeed(body.gravParameter, body.radius + lift_settings.destination_Ap_km.V * 1000.0);
+            target_inc = Fido.Constellation.OrbitMath.InclinationForHeading(lift_settings.heading.V, lift.launch_latitude, v_orbit,
+                Fido.Constellation.OrbitMath.EquatorialSurfaceSpeed(body));
+
+            Vector3d r = orbit.GetRelativePositionAtUTZup(ut);
+            Vector3d v = orbit.GetOrbitalVelocityAtUTZup(ut);
+            Vector3d up = r.normalized;
+            Vector3d east = Vector3d.Cross(new Vector3d(0, 0, 1), up);   // spin axis is +z in the Zup frame
+            if (east.magnitude < 1e-6) return false;                     // over a pole
+            east = east.normalized;
+            Vector3d north = Vector3d.Cross(up, east);
+            Vector3d vh = v - Vector3d.Dot(v, up) * up;
+            double vh_mag = vh.magnitude;
+            if (vh_mag < 1) return false;
+
+            double lat = System.Math.Asin(System.Math.Max(-1, System.Math.Min(1, up.z)));
+            double ratio = System.Math.Cos(target_inc * deg) / System.Math.Max(System.Math.Cos(lat), 1e-6);
+            double beta = System.Math.Asin(System.Math.Max(-1, System.Math.Min(1, ratio)));  // azimuth from north
+            if (Vector3d.Dot(vh, north) < 0) beta = System.Math.PI - beta;                    // going south
+            double cur = System.Math.Atan2(Vector3d.Dot(vh, east), Vector3d.Dot(vh, north));
+            double dpsi = beta - cur;
+            while (dpsi > System.Math.PI) dpsi -= 2 * System.Math.PI;
+            while (dpsi < -System.Math.PI) dpsi += 2 * System.Math.PI;
+            turn_deg = dpsi / deg;
+            if (System.Math.Abs(turn_deg) < PlaneDeadbandDeg) return false;
+            dpsi = System.Math.Max(-PlaneMaxTurnDeg * deg, System.Math.Min(PlaneMaxTurnDeg * deg, dpsi));
+
+            double after = vh_mag + dv;
+            prograde = after * System.Math.Cos(dpsi) - vh_mag;
+            // +dpsi turns the velocity toward higher azimuth (cross(vh, up)); the orbit normal
+            // cross(r, v) points the other way
+            normal_zup = -after * System.Math.Sin(dpsi);
+            return true;
+        }
+
+        // The planned orbit after the node, from the game's own solver: true = use it, false = it
+        // was replanned (sign flipped, or the correction dropped), null = not solved yet.
+        bool? VerifyPlane()
+        {
+            var solver = current_vessel?.VesselComponent?.Orbiter?.ManeuverPlanSolver;
+            var trajectory = solver?.ManeuverTrajectory;
+            if (trajectory == null || trajectory.Count == 0 || node == null) return null;
+            var patch = trajectory.OfType<PatchedConicsOrbit>()
+                .Where(p => p.StartUT >= node.Time - 5)
+                .OrderBy(p => p.StartUT)
+                .FirstOrDefault();
+            if (patch == null) return null;
+            double after = patch.inclination;
+            bool better = System.Math.Abs(after - target_inc) < System.Math.Abs(inc_before - target_inc);
+            logger.LogInfo($"[Stage1Burn] plane: node gives inc {after:n2}° (was {inc_before:n2}°, target {target_inc:n2}°, normal sign {normal_sign:+0;-0}) - {(better ? "OK" : "wrong way")}");
+            if (better) return true;
+            verify_tries++;
+            if (verify_tries == 1) normal_sign = -normal_sign;   // try the other sign
+            else
+            {
+                logger.LogWarning("[Stage1Burn] plane: neither normal sign improves the inclination - burning prograde only");
+                plan_prograde = lift.last_s1_burn_dv;
+                plan_normal_zup = 0;
+            }
+            node = null;
+            PlaceNode();
+            return false;
         }
 
         // true if any engine left on board is lit; otherwise reports the activation stage of the
@@ -220,6 +336,18 @@ namespace Fido.Lift
                     {
                         CreateNode();
                         settle_until = double.PositiveInfinity; // once
+                    }
+                    return;
+
+                case Mode.Verify:
+                    maneuver_creator.Update();
+                    if (node == null) return;  // being replanned
+                    var ok = VerifyPlane();
+                    if (ok == true) StartTurn();
+                    else if (ok == null && UnityEngine.Time.unscaledTime - verify_since > 3)
+                    {
+                        logger.LogInfo("[Stage1Burn] plane: no prediction after 3 s - flying the node unchecked");
+                        StartTurn();
                     }
                     return;
 

@@ -159,6 +159,9 @@ namespace Fido.Lift
             last_circ_dv = 0;
             last_s1_burn_dv = -1;
             last_s1_sep_ap = last_s1_sep_pe = double.NaN;
+            var v = FidoPlugin.Instance.current_vessel?.VesselComponent;
+            if (start_status == LiftStatus.Ascent && v != null && v.Landed)
+                launch_latitude = v.Latitude;
             logger.LogInfo($"[Lift] starting at {start_status}");
             var first = FirstAvailable(start_status);
             if (first == LiftStatus.Off)
@@ -183,6 +186,10 @@ namespace Fido.Lift
         internal double last_s1_burn_dv = -1;
         // the orbit when stage 1 separated (Stage1Burn), km; NaN = it didn't
         internal double last_s1_sep_ap = double.NaN, last_s1_sep_pe = double.NaN;
+
+        // pad latitude of the last launch from the ground (deg): the heading's target inclination
+        // is worked out from it (Stage1Burn turns the orbit into that plane)
+        internal double launch_latitude = double.NaN;
 
         internal bool result_ok = false;
         internal string end_status;
