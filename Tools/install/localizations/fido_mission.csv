@@ -1,0 +1,8 @@
+Key,Type,Desc,English
+PartModules/FidoMission/Name,Text,,FIDO Mission
+PartModules/FidoMission/Holder,Text,,Carries the mission
+PartModules/FidoMission/Steps,Text,,Mission
+PartModules/FidoMission/Edit,Text,,Edit mission
+PartModules/FidoActions/Name,Text,,FIDO Mission action
+PartModules/FidoActions/Add,Text,,Add action to mission
+PartModules/FidoActions/Satellite,Text,,Releases a satellite

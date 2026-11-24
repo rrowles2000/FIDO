@@ -1,6 +1,6 @@
 # Attribution
 
-K2D2 for KSP2 Redux is licensed under Creative Commons Attribution-ShareAlike
+FIDO (Flight Dynamics Operator; named K2D2 for KSP2 Redux until 2026-11-24) is licensed under Creative Commons Attribution-ShareAlike
 4.0 International (CC-BY-SA 4.0) - see `LICENSE.md`.
 
 ## K2-D2 (original)

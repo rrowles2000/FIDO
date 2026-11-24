@@ -1,0 +1,27 @@
+{
+  "spec": "2.0",
+  "mod_id": "FIDO",
+  "name": "FIDO",
+  "author": "rrowles2000 (from K2-D2 by Christophe Floutier, K2D2Redux by IanMealworm)",
+  "description": "FIDO (Flight Dynamics Operator) is a mission autopilot for KSP2 Redux: ascent, maneuver node execution, transfers, landing, docking, constellations and mission plans, all from one panel (Alt-O or AppBar). Based on K2-D2 by Christophe Floutier and its Redux port K2D2Redux by IanMealworm (CC BY-SA 4.0).",
+  "source": "https://github.com/rrowles2000/K2D2Redux",
+  "version": "2.0.0",
+  "version_check": "",
+  "addressable_script_label": "FIDO_patches",
+  "addressable_prefab_patch_label": "FIDO_prefab_patches",
+  "ksp2_version": {
+    "min": "*",
+    "max": "*"
+  },
+  "dependencies": [
+    {
+      "id": "SpaceWarp2",
+      "version": {
+        "min": "2.0.0",
+        "max": "*"
+      }
+    }
+  ],
+  "conflicts": [],
+  "main_assembly": "Fido.dll"
+}

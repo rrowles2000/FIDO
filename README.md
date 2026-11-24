@@ -1,4 +1,16 @@
-# K2-D2 (Redux port)
+# FIDO — Flight Dynamics Operator (formerly K2-D2, Redux port)
+
+> **Renamed 2026-11-24.** This fork of K2D2Redux is now **FIDO** (Flight Dynamics Operator, after NASA's
+> Flight Dynamics Officer console): mod_id `FIDO`, `Fido.dll`, namespace `Fido.*`, game folder `mods/FIDO`.
+> To move an existing install and its saves over, close the game and run `Tools/migrate_install.py`
+> (it backs up first), then `Tools/build.sh --install`. FIDO is based on **K2-D2** by Christophe Floutier and
+> **K2D2Redux** by IanMealworm / KSP2Community; their credits and the CC BY-SA 4.0 licence are kept below
+> and in [`NOTICE.md`](NOTICE.md). The history below still says K2-D2 where it describes the earlier work.
+>
+> Not renamed (the prebuilt UI bundle can't be rebuilt without the Unity editor): the `K2UI` control
+> namespace, `Assets/UI/K2D2_UI/K2D2_Window.uxml` and its addressables groups, USS class names, and the
+> `K2D2.LateBound` carrier marker.
+
 
 An astromech-style autopilot suite for Kerbal Space Program 2, ported to the **Redux** modding framework from [Christophe Floutier's original K2-D2](https://github.com/cfloutier) (built for SpaceWarp1).
 

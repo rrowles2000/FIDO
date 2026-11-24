@@ -1,8 +1,0 @@
-Key,Type,Desc,English
-PartModules/K2D2Mission/Name,Text,,K2-D2 Mission
-PartModules/K2D2Mission/Holder,Text,,Carries the mission
-PartModules/K2D2Mission/Steps,Text,,Mission
-PartModules/K2D2Mission/Edit,Text,,Edit mission
-PartModules/K2D2Actions/Name,Text,,K2-D2 Mission action
-PartModules/K2D2Actions/Add,Text,,Add action to mission
-PartModules/K2D2Actions/Satellite,Text,,Releases a satellite
