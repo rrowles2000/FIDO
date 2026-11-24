@@ -23,6 +23,13 @@ namespace Fido.Training
 
         public Setting<int> flights = new("training.flights", DefaultFlights);
 
+        // 2026-11-24: Revert to Launch never runs Unity's UnloadUnusedAssets (Player.log only shows
+        // it at startup), so each reverted flight's dropped assets stay in VRAM - polar flights
+        // +0.65-0.9 GB per revert, crash loading flight 3 at ~11.6 of 12 GB. Unload once back on the
+        // pad; the census logs what is loaded / grew / was freed (KTools.AssetCensus, FIDO.Census).
+        public Setting<bool> unload_on_revert = new("training.unload_on_revert", true);
+        public Setting<bool> asset_census = new("training.asset_census", true);
+
         // 2026-11-14: the game froze on the 7th flight in a row, then crashed in d3d11 (DXVK)
         // reloading the scene after the 4th revert - sessions are capped at the most that has
         // completed cleanly; restart the game between sessions
@@ -31,9 +38,9 @@ namespace Fido.Training
         public const int DefaultFlights = 3;
 
         public const int MaxFailsInARow = 3;
-        const float PadSettleSeconds = 5, ResultPauseSeconds = 3, RevertTimeoutSeconds = 120;
+        const float PadSettleSeconds = 5, ResultPauseSeconds = 3, RevertTimeoutSeconds = 120, UnloadTimeoutSeconds = 60;
 
-        public enum Phase { Idle, WaitPad, Flying, Pause, Reverting }
+        public enum Phase { Idle, WaitPad, Unloading, Flying, Pause, Reverting }
         public Phase phase { get; private set; } = Phase.Idle;
 
         public int done, ok_count, fails_in_a_row, target;
@@ -44,6 +51,10 @@ namespace Fido.Training
         IGGuid vessel_id;
         double flight_end_ut;
         float phase_time;
+        bool unloaded_this_revert;
+        AsyncOperation unload_op;
+        AssetCensus.Snapshot unload_before;
+        float unload_started;
 
         public TrainingPilot()
         {
@@ -76,6 +87,7 @@ namespace Fido.Training
             done = ok_count = fails_in_a_row = 0;
             results.Clear();
             logger.LogInfo($"[Training] start: {target} flights");
+            if (asset_census.V) AssetCensus.Take("training start");
             base.isRunning = true;
             StartFlight();
         }
@@ -184,7 +196,7 @@ namespace Fido.Training
                     // back at launch: the clock goes back to launch time and the vessel sits on the pad
                     var vessel = Vessel;
                     bool back = InFlight() && vessel != null && vessel.Landed && GeneralTools.Current_UT < flight_end_ut - 1;
-                    if (back) { phase = Phase.WaitPad; phase_time = Time.unscaledTime; return; }
+                    if (back) { phase = Phase.WaitPad; phase_time = Time.unscaledTime; unloaded_this_revert = false; return; }
                     if (t > RevertTimeoutSeconds) Stop("Revert didn't complete - stopped");
                     break;
                 }
@@ -194,10 +206,35 @@ namespace Fido.Training
                     var vessel = Vessel;
                     if (vessel == null || !vessel.Landed) { phase_time = Time.unscaledTime; return; }
                     SetStatus($"Flight {done + 1} of {target}: settling on the pad", true);
-                    if (t >= PadSettleSeconds) StartFlight();
+                    if (t < PadSettleSeconds) return;
+                    if (unload_on_revert.V && !unloaded_this_revert) { BeginUnload(); return; }
+                    StartFlight();
                     break;
                 }
+
+                case Phase.Unloading:
+                    if (unload_op != null && !unload_op.isDone && t < UnloadTimeoutSeconds) return;
+                    if (unload_op != null && !unload_op.isDone)
+                        logger.LogWarning($"[Training] unload still running after {UnloadTimeoutSeconds} s - launching anyway");
+                    AssetCensus.Finish($"after revert {done}", unload_started, unload_before, asset_census.V);
+                    unload_op = null;
+                    unload_before = null;
+                    phase = Phase.WaitPad;
+                    phase_time = Time.unscaledTime - PadSettleSeconds;  // settled already
+                    break;
             }
+        }
+
+        void BeginUnload()
+        {
+            unloaded_this_revert = true;
+            string tag = $"after revert {done}";
+            SetStatus($"Flight {done + 1} of {target}: unloading the last flight's assets", true);
+            unload_before = asset_census.V ? AssetCensus.Take(tag) : null;
+            unload_started = Time.realtimeSinceStartup;
+            unload_op = AssetCensus.StartUnload(tag);
+            phase = Phase.Unloading;
+            phase_time = Time.unscaledTime;
         }
 
         // ================================================================ game

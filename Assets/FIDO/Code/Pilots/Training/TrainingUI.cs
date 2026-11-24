@@ -77,6 +77,14 @@ namespace Fido.Training
             };
             page.Add(run_button);
 
+            // VRAM after reverts (notes/20261123-211500_bug_gpu-hang-after-reverts.md)
+            var unload = new K2Toggle("Unload unused assets after each revert");
+            unload.Bind(pilot.unload_on_revert);
+            page.Add(unload);
+            var census = new K2Toggle("Log an asset census (FIDO.Census)");
+            census.Bind(pilot.asset_census);
+            page.Add(census);
+
             // the live view: a page served outside the game by ksp2-redux/tools/liveview/liveview.py
             // from Ksp2.log, for a second screen. The game (under Proton) can open a URL but can't
             // reliably start a Linux program, so the server is started outside it.
