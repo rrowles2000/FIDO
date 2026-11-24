@@ -166,9 +166,17 @@ namespace K2UI.Tabs
             Add(el_label);
             Add(icon);
 
-            // square: overrides the bundle's pill-shaped k2-tab-button sizing
-            style.width = style.height = 34;
+            // overrides the bundle's pill-shaped k2-tab-button sizing. Every tab splits the bar equally:
+            // K2D2.uss gives only the original tabs (#node, #lift, ... #about) flex-grow: 1, so the
+            // code-built ones (Mission, Sats, Training) stayed 34 px while the rest stretched.
+            // Inline styles win over the bundle's USS.
+            style.height = 34;
+            style.width = StyleKeyword.Auto;
+            style.flexBasis = 0;
+            style.flexGrow = 1;
+            style.flexShrink = 1;
             style.minWidth = 34;
+            style.marginRight = 0;
             style.paddingLeft = style.paddingRight = style.paddingTop = style.paddingBottom = 0;
             style.borderTopLeftRadius = style.borderTopRightRadius = style.borderBottomLeftRadius = style.borderBottomRightRadius = 6;
             style.justifyContent = Justify.Center;
