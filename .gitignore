@@ -103,3 +103,4 @@ ksp2.catalog
 # accident instead of Assets/K2D2/Code (now Assets/FIDO/Code) - the folder is dead, Unity never reads it, safe to ignore
 # or delete manually). See NOTICE.md's Fifteenth follow-up.
 /Source/
+__pycache__/
