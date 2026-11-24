@@ -124,6 +124,54 @@ namespace Fido.UI
         /// then) and again on any later live UI reload. All the wiring that needs the real root
         /// VisualElement lives here instead of OnEnable for that reason.
         /// </summary>
+        /// <summary>
+        /// FIDO identity on the prebuilt bundle's window (its UXML still says "K2-D2" with the K2 icon):
+        /// title, the Tile icon in the header, and the avatar state overlay on that icon.
+        /// </summary>
+        void Brand()
+        {
+            if (_rootElement is UitkForKsp2.Controls.AppShell shell)
+            {
+                shell.Title = "FIDO";
+                var tex = FidoIcons.Icon;
+                if (tex != null) shell.IconTexture = tex;
+            }
+            var info = _rootElement.Q<Button>("info-toggle");
+            if (info != null) info.tooltip = "About FIDO";
+
+            var header_icon = _rootElement.Q("header-icon") ?? _rootElement.Q(className: "header-icon");
+            if (header_icon == null)
+            {
+                L.Log("FidoWindow.Brand: no header-icon element - avatar not shown");
+                return;
+            }
+            FidoAvatar.Attach(header_icon, AvatarReading);
+        }
+
+        /// <summary>The avatar's state: worst status line showing in the open tab, and whether any pilot runs.</summary>
+        FidoAvatar.Reading AvatarReading()
+        {
+            var r = new FidoAvatar.Reading { state = FidoAvatar.State.Idle, tooltip = "FIDO: standing by" };
+            bool running = FidoPlugin.Instance?.pilots_manager.AnyRunning() ?? false;
+            StatusLine worst = null;
+            var page = tab_page == null ? null : tab_page.Q<TabPage>(tab_page.CurrentTabCode);
+            page?.Query<StatusLine>().ForEach(s =>
+            {
+                if (s.resolvedStyle.display == DisplayStyle.None || string.IsNullOrEmpty(s.text)) return;
+                if (worst == null || s.level > worst.level) worst = s;
+            });
+            if (worst != null)
+            {
+                r.message = worst.text;
+                r.tooltip = "FIDO: " + worst.text;
+            }
+            else if (running) r.tooltip = "FIDO: flying";
+            if (worst != null && worst.level == StatusLine.Level.Error) r.state = FidoAvatar.State.Error;
+            else if (worst != null && worst.level == StatusLine.Level.Warning) r.state = FidoAvatar.State.Warning;
+            else if (running) r.state = FidoAvatar.State.Running;
+            return r;
+        }
+
         private void OnUiReload(UIDocument panel, VisualElement root)
         {
             L.Log("FidoWindow.OnUiReload running");
@@ -156,6 +204,8 @@ namespace Fido.UI
             }
             // Add a click event handler to the close button
             closeButton.clicked += () => IsWindowOpen = false;
+
+            Brand();
 
             // list all pilot panel
             all_panels.Clear();

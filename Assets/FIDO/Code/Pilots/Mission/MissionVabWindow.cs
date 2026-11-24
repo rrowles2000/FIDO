@@ -75,6 +75,8 @@ namespace Fido.Mission
             root = ui;
             K2UI.HoverTip.StartSweeping(ui);
             shell = new UitkForKsp2.Controls.AppShell { Title = "FIDO Mission" };
+            var fido_icon = Fido.UI.FidoIcons.Icon;
+            if (fido_icon != null) ((UitkForKsp2.Controls.AppShell)shell).IconTexture = fido_icon;
             shell.style.position = Position.Absolute;
             shell.style.left = 380;
             shell.style.top = 80;

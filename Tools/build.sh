@@ -30,6 +30,8 @@ if [ "${1:-}" = "--install" ]; then
   cp Assets/FIDO/swinfo.json "$DEST/swinfo.json"
   mkdir -p "$DEST/patches"
   cp Tools/install/patches/*.lua "$DEST/patches/"
+  mkdir -p "$DEST/assets/images"
+  cp Assets/FIDO/Copied/assets/images/fido_*.png "$DEST/assets/images/"
   mkdir -p "$DEST/localizations"
   cp Tools/install/localizations/*.csv "$DEST/localizations/"
   # Patch Manager only rebuilds its cache when the mod list changes - clear it so patch edits apply

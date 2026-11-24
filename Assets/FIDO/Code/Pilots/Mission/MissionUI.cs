@@ -29,7 +29,9 @@ namespace Fido.Mission
 
         FullStatus status_bar;
         VisualElement no_plan_el, plan_el, current_el;
-        Label current_title, current_detail, dv_label, advice_label;
+        Label current_title, current_detail, advice_label, head_note;
+        Pill state_pill;
+        Readout dv_readout, step_readout;
         ToggleButton run_button;
         Button skip_button, manual_button, reset_button;
         MissionEditor editor;
@@ -40,47 +42,37 @@ namespace Fido.Mission
             page.style.flexGrow = 1;
             panel.Add(page);
 
-            var title = new Label("Mission");
-            title.AddToClassList("unselectedContent");
-            title.style.width = Length.Percent(100);
-            title.style.unityTextAlign = UnityEngine.TextAnchor.UpperCenter;
-            page.Add(title);
+            // ---- header: state pill + where we are
+            var head = FidoKit.Row(page, 6);
+            head.style.alignItems = Align.Center;
+            head.style.flexWrap = Wrap.NoWrap;
+            state_pill = new Pill(head);
+            head_note = FidoKit.Hint(head);
+            head_note.style.flexShrink = 1;
 
             // ---- no plan
-            no_plan_el = new VisualElement();
-            var none = new Label("This craft has no mission plan. Plans are made in the VAB (FIDO Mission " +
-                                 "button) and saved with the craft, or you can start one here.");
-            none.style.whiteSpace = WhiteSpace.Normal;
-            no_plan_el.Add(none);
+            no_plan_el = FidoKit.Panel(page, "Mission");
+            FidoKit.Text(no_plan_el, "This craft has no mission plan. Plans are made in the VAB (FIDO Mission " +
+                                     "button) and saved with the craft, or you can start one here.");
             no_plan_el.Add(SmallButton("Create a mission here", () =>
             {
                 pilot.CreatePlan();
                 pilot.PlanChanged();
             }));
-            page.Add(no_plan_el);
 
             plan_el = new VisualElement();
             page.Add(plan_el);
 
             // ---- current step
-            current_el = new VisualElement();
-            current_el.style.marginBottom = 6;
-            current_title = new Label();
-            current_title.style.unityFontStyleAndWeight = UnityEngine.FontStyle.Bold;
-            current_title.style.whiteSpace = WhiteSpace.Normal;
-            current_el.Add(current_title);
-            current_detail = new Label();
-            current_detail.AddToClassList("k2-slider-value-label");
-            current_detail.style.whiteSpace = WhiteSpace.Normal;
-            current_el.Add(current_detail);
-            dv_label = new Label();
-            dv_label.AddToClassList("k2-slider-value-label");
-            current_el.Add(dv_label);
-            advice_label = new Label();
-            advice_label.AddToClassList("k2-slider-value-label");
-            advice_label.style.whiteSpace = WhiteSpace.Normal;
-            advice_label.style.color = new UnityEngine.Color(1f, 0.85f, 0.5f);
-            current_el.Add(advice_label);
+            current_el = FidoKit.Panel(null, "Current step");
+            current_title = FidoKit.Text(current_el, "", bold: true);
+            current_detail = FidoKit.Hint(current_el);
+            var readouts = FidoKit.Row(current_el, 0);
+            readouts.style.marginTop = 4;
+            step_readout = new Readout("Step", readouts);
+            dv_readout = new Readout("Vessel Δv (vac)", readouts);
+            advice_label = FidoKit.Text(current_el);
+            FidoKit.SetTone(advice_label, Tone.Warn);
 
 
             run_button = new ToggleButton { label = "Go", name = "run" };
@@ -115,7 +107,9 @@ namespace Fido.Mission
             plan_el.Add(ConstellationUI.StatusGroup());
 
             // ---- steps
+            var steps_panel = FidoKit.Panel(null);
             var steps = new Foldout { text = "STEPS", value = true };
+            steps_panel.Add(steps);
             editor = new MissionEditor
             {
                 get_plan = () => pilot.plan,
@@ -131,7 +125,7 @@ namespace Fido.Mission
                 launch_first = MissionPilot.OnGround,
             };
             steps.Add(editor.Build());
-            plan_el.Add(steps);
+            plan_el.Add(steps_panel);
 
             reset_button = SmallButton("Reset mission to step 1", pilot.ResetMission);
             reset_button.style.marginTop = 8;
@@ -166,7 +160,12 @@ namespace Fido.Mission
             no_plan_el.Show(plan == null);
             plan_el.Show(plan != null);
             status_bar.Reset();
-            if (plan == null) return true;
+            if (plan == null)
+            {
+                state_pill.Set("No plan", Tone.Muted);
+                head_note.text = "";
+                return true;
+            }
 
             editor.Refresh();
 
@@ -176,7 +175,9 @@ namespace Fido.Mission
             {
                 current_title.text = plan.IsEmpty ? "Add some steps below" : "Mission complete";
                 current_detail.text = "";
-                dv_label.text = "";
+                state_pill.Set(plan.IsEmpty ? "Empty" : "Complete", plan.IsEmpty ? Tone.Muted : Tone.Ok);
+                head_note.text = $"{plan.steps.Count} step(s)";
+                step_readout.Set(plan.IsEmpty ? "-" : $"{plan.steps.Count} / {plan.steps.Count}");
                 advice_label.text = "";
                 advice_label.Show(false);
                 run_button.Show(false);
@@ -189,7 +190,12 @@ namespace Fido.Mission
                 current_detail.text = running ? pilot.Runner?.status ?? "" : step.auto ? "Auto-continue" : "Waiting for Go";
                 var vessel = FidoPlugin.Instance.current_vessel?.VesselComponent;
                 double dv = vessel?.VesselDeltaV?.TotalDeltaVVac ?? 0;
-                dv_label.text = $"Vessel Δv (vac): {dv:n0} m/s";
+                dv_readout.Set($"{dv:n0} m/s");
+                step_readout.Set($"{plan.current + 1} / {plan.steps.Count}", running ? Tone.Run : Tone.Normal);
+                bool blocked = !running && pilot.GoProblem() != null;
+                state_pill.Set(running ? "Running" : blocked ? "Blocked" : "Ready",
+                               running ? Tone.Run : blocked ? Tone.Warn : Tone.Normal);
+                head_note.text = step.Summary;
                 string advice = null;
                 if (!running)
                 {

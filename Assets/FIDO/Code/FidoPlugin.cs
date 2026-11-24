@@ -197,7 +197,7 @@ namespace Fido
             Appbar.RegisterAppButton(
                 SWMetadata.Name,
                 ToolbarFlightButtonID,
-                AssetsLoader.LoadIcon("icon.png"),
+                FidoIcons.Icon,
                 isOpen => main_window.IsWindowOpen = isOpen
             );
 
@@ -206,7 +206,7 @@ namespace Fido
             Appbar.RegisterOABAppButton(
                 "FIDO Mission",
                 Fido.Mission.MissionVabWindow.ButtonId,
-                AssetsLoader.LoadIcon("icon.png"),
+                FidoIcons.Icon,
                 isOpen => mission_vab_window.IsOpen = isOpen
             );
 
