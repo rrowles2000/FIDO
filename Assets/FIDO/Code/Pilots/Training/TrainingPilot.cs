@@ -33,7 +33,7 @@ namespace Fido.Training
         // revert itself still peaks at 11.7-11.8 of 12 GB (new scene loads while the old one is
         // held). Unloading what the flight already dropped (staged debris, terrain it flew over)
         // before reverting lowers the base that peak starts from.
-        public Setting<bool> unload_before_revert = new("training.unload_before_revert", true);
+        public Setting<bool> unload_before_revert = new("training.unload_before_revert", false);
 
         // 2026-11-14: the game froze on the 7th flight in a row, then crashed in d3d11 (DXVK)
         // reloading the scene after the 4th revert - sessions are capped at the most that has
