@@ -86,8 +86,26 @@ namespace Fido.Training
             if (phase == Phase.Flying && Lift.isRunning) Lift.isRunning = false;
             phase = Phase.Idle;
             base.isRunning = false;
-            SetStatus($"{why} after {done} of {target} flights ({ok_count} reached orbit)", why != "Stopped");
+            if (why == "Finished")
+                SetStatus($"Training complete: {ok_count} of {target} flights reached orbit", ok_count == target);
+            else
+                SetStatus($"{why} after {done} of {target} flights ({ok_count} reached orbit)", why != "Stopped");
             logger.LogInfo($"[Training] {why}: {done}/{target} flown, {ok_count} reached orbit");
+            // ended by itself (finished, too many failures, revert failed) while still in flight:
+            // show the result - the window is often closed during a long session
+            if (why != "Stopped" && why != "Left flight") ShowTrainingTab();
+        }
+
+        static void ShowTrainingTab()
+        {
+            try
+            {
+                var w = Fido.UI.FidoWindow.Instance;
+                if (w == null) return;
+                w.IsWindowOpen = true;
+                w.SelectTab(TrainingUI.Code);
+            }
+            catch (Exception) { }  // UI not ready - the status is in the Training tab and the log anyway
         }
 
         public override bool isRunning
