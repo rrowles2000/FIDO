@@ -26,7 +26,10 @@ namespace Fido.Saves
         public static void Apply(Harmony harmony)
         {
             Patch(harmony, typeof(SaveLoadManager), "SaveInternal", nameof(SaveInternalPrefix), prefix: true);
-            Patch(harmony, typeof(CampaignMenu), "Initialize", nameof(CampaignMenuInitializePostfix), prefix: false);
+            // DISABLED 2026-11-24: the button is a clone of the game's Delete Campaign button and the clone
+            // still carried the game's delete wiring - pressing it opened the game's campaign-delete dialog
+            // and deleted the whole campaign. Off until it is rebuilt from scratch (not cloned) and tested.
+            // Patch(harmony, typeof(CampaignMenu), "Initialize", nameof(CampaignMenuInitializePostfix), prefix: false);
         }
 
         static void Patch(Harmony harmony, Type type, string method, string patch, bool prefix)

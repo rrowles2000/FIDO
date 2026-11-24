@@ -11,7 +11,7 @@ Run with the game closed, then run `Tools/build.sh --install`.
 4. Rewrites the saved part-module types in every save (.json) that mentions K2D2:
    K2D2.Mission.Module_K2Mission, K2D2 -> Fido.Mission.Module_FidoMission, Fido (and the Data_ /
    PartComponentModule_ / ActionTarget types), plus the save's mod list entry K2D2 -> FIDO.
-   Each rewritten file is checked to still parse as JSON before it is written (tmp -> replace).
+   .meta files (the mod list) get the same rewrite. Each rewritten file is checked to still parse as JSON before it is written (tmp -> replace).
 
   --dry-run   report what would change, touch nothing
 """
@@ -131,7 +131,7 @@ def main():
     files = changes = 0
     for dp, _, fs in os.walk(a.saves):
         for f in fs:
-            if f.endswith(".json"):
+            if f.endswith((".json", ".meta")):
                 n = migrate_save(os.path.join(dp, f), dry)
                 if n:
                     files += 1
