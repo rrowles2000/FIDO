@@ -74,7 +74,11 @@ namespace Fido.Mission
                 status_line = "Game loaded - press Go to carry on";
                 Save();
             }
-            PrepareCurrent();
+            // No PrepareCurrent() here: a step's Prepare writes its plan values into the tabs (the
+            // Launch step sets Lift's heading, Ap, stage-1 burn...), and this runs on every vessel load,
+            // including each Training revert - flight 2 of a polar Training session flew the plan's
+            // heading 90° instead of the 355.6° set by hand (2026-11-24). Steps are prepared when the
+            // mission runs (Go / next step) or when the plan is edited.
         }
 
         static int PartCount(VesselComponent vessel) => vessel?.SimulationObject?.PartOwner?.Parts?.Count() ?? -1;
