@@ -11,6 +11,13 @@ namespace Fido.Controller
             pilots.Add(controller);
         }
 
+        public bool AnyRunning()
+        {
+            foreach (var controller in pilots)
+                if (controller.isRunning) return true;
+            return false;
+        }
+
         public void onReset()
         {
             foreach (var controller in pilots)

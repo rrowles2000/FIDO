@@ -305,10 +305,12 @@ namespace Fido
                 {
                     // Update Controllers only if staging is not in progress
                     pilots_manager.UpdateControllers();
-                }   
+                }
+                Fido.KSPService.KerbalVoiceMute.Update(pilots_manager.AnyRunning());
             }
             else
             {
+                Fido.KSPService.KerbalVoiceMute.Update(false);
                 if (main_window != null && main_window.IsWindowOpen)
                     main_window.IsWindowOpen = false;
             }
