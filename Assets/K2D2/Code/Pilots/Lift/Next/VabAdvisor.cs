@@ -51,6 +51,11 @@ namespace K2D2.Lift.Next
         static float unknown_since = -1;
         static bool last_was_good;
 
+        static int dv_version, craft_version = -1;
+        static Stage1Model craft_model;
+        static object craft_part;
+        static VesselDeltaVComponent craft_dv;
+
         static bool api_looked;
         static MethodInfo marked_method, set_method;
         static bool error_logged;
@@ -123,6 +128,39 @@ namespace K2D2.Lift.Next
             return good ? r.Short() + " · " + stability.Short() + learned : r.problem;
         }
 
+        /// <summary>
+        /// The craft in the VAB as a stage-1 model (marked separator if StageGroup has one, else the
+        /// first engine stage counts as stage 1) - for the Mission window's stage checks. Null if the
+        /// craft has no Δv data yet.
+        /// </summary>
+        public static Stage1Model CraftModel()
+        {
+            try
+            {
+                if (!InVab()) return null;
+                if (!subscribed) Subscribe();
+                object part = FindApi() ? marked_method.Invoke(null, null) : null;
+                var dv = part != null ? FindDeltaV(part) : null;
+                dv ??= K2D2.Mission.MissionStore.MainAssembly?.VesselDeltaV ?? (recent.Count > 0 ? recent[0] : null);
+                var body = GameManager.Instance?.Game?.UniverseModel?.HomeWorld;
+                if (dv == null || body == null) return null;
+                // rebuilt only when the game recalculates the craft's Δv (building logs every stage)
+                if (craft_model != null && ReferenceEquals(part, craft_part) && ReferenceEquals(dv, craft_dv) && craft_version == dv_version)
+                    return craft_model;
+                craft_model = Stage1Model.FromDeltaV(dv, body, 0, LaunchAltitudeM, part as IDeltaVPart, allowNoUpper: true);
+                craft_part = part;
+                craft_dv = dv;
+                craft_version = dv_version;
+                return craft_model;
+            }
+            catch (Exception e)
+            {
+                if (!error_logged) logger.LogError("[VAB] craft model for the mission window failed: " + e);
+                error_logged = true;
+                return null;
+            }
+        }
+
         // the Δv component whose stages contain the marked separator (else the latest one seen)
         static VesselDeltaVComponent FindDeltaV(object part)
         {
@@ -159,6 +197,7 @@ namespace K2D2.Lift.Next
                 if (comp == null) return;
                 recent.Remove(comp);
                 recent.Insert(0, comp);
+                dv_version++;
                 if (recent.Count > 6) recent.RemoveAt(recent.Count - 1);
                 dirty = true;
             });

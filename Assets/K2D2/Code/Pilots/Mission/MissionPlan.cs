@@ -97,12 +97,13 @@ namespace K2D2.Mission
         }
     }
 
-    public enum ParamKind { Float, Int, Bool }
+    public enum ParamKind { Float, Int, Bool, Choice }
 
     public class ParamDef
     {
         public string key, label, def, hint;
         public ParamKind kind;
+        public Func<List<string>> choices; // Choice only
 
         public ParamDef(string key, string label, ParamKind kind, string def, string hint = null)
         {
@@ -159,6 +160,9 @@ namespace K2D2.Mission
         public const string Deploy = "deploy";
         public const string Node = "node";
         public const string PartActions = "part_actions";
+        public const string Transfer = "transfer";
+        public const string Correction = "correction";
+        public const string Capture = "capture";
 
         static string Km(MissionStepData s, string key) => $"{s.GetFloat(key):0.#} km";
 
@@ -268,6 +272,47 @@ namespace K2D2.Mission
             },
             new StepType
             {
+                id = Transfer, label = "Transfer to moon",
+                parameters =
+                {
+                    new ParamDef("target", "Target", ParamKind.Choice, "Mun") { choices = TransferChecks.TargetChoices },
+                    new ParamDef("pe_km", "Arrival periapsis (km)", ParamKind.Float, "50",
+                        "Places the departure node only (replacing any nodes on the plan) - add Execute node after it. " +
+                        "With a Capture step later, that step's altitude and orbit are aimed for instead"),
+                },
+                summary = s => $"Transfer to {s.Get("target")} (Pe {Km(s, "pe_km")})",
+                create = () => new TransferRunner(),
+            },
+            new StepType
+            {
+                id = Correction, label = "Course correction",
+                parameters =
+                {
+                    new ParamDef("target", "Target", ParamKind.Choice, "Mun") { choices = TransferChecks.TargetChoices },
+                    new ParamDef("pe_km", "Arrival periapsis (km)", ParamKind.Float, "50",
+                        "On the way out: places a small node that puts the arrival back on target - add Execute node after it. " +
+                        "With a Capture step later, that step's altitude and orbit are aimed for instead"),
+                },
+                summary = s => $"Course correction to {s.Get("target")} (Pe {Km(s, "pe_km")})",
+                create = () => new CorrectionRunner(),
+            },
+            new StepType
+            {
+                id = Capture, label = "Capture at moon",
+                parameters =
+                {
+                    new ParamDef("target", "Target", ParamKind.Choice, "Mun") { choices = TransferChecks.TargetChoices },
+                    new ParamDef("alt_km", "Orbit altitude (km)", ParamKind.Float, "50",
+                        "The Transfer and Course correction steps before it aim the arrival for this altitude and plane"),
+                    new ParamDef("orbit", "Orbit", ParamKind.Choice, TransferPlanner.PlaneEquatorial,
+                        "Equatorial or polar needs a Course correction on the way unless the departure already lines up")
+                        { choices = TransferPlanner.PlaneChoices },
+                },
+                summary = s => $"Capture at {s.Get("target")}: {Km(s, "alt_km")} {TransferPlanner.PlaneName(TransferPlanner.ParsePlane(s.Get("orbit")))} orbit",
+                create = () => new CaptureRunner(),
+            },
+            new StepType
+            {
                 id = Node, label = "Execute node",
                 summary = s => "Execute the next manoeuvre node",
                 create = () => new NodeRunner(),
@@ -317,8 +362,52 @@ namespace K2D2.Mission
                     issues.Add(new Issue { step = i, error = true, text = $"Step {i + 1}: no part actions - click 'Add action to mission' in a part's window" });
                 if (s.type == StepCatalog.Altitude && s.GetFloat("alt_km") < 71)
                     issues.Add(new Issue { step = i, error = true, text = $"Step {i + 1}: altitude must be above the atmosphere (70 km)" });
+                TransferChecks.CheckOrder(steps, i, issues);
             }
             return issues;
+        }
+
+        /// <summary>
+        /// Check() plus the stage checks: the plan's burns from step 'from' on taken off 'budget'
+        /// (the stages left after stage 1, or the vessel's stages in flight). parking_period: the
+        /// parking orbit's period, for the long-burn warning (0 = don't know).
+        /// </summary>
+        public static List<Issue> Check(MissionPlanData plan, StageBudget budget, List<double> dv, int from, double parking_period)
+        {
+            var issues = Check(plan);
+            if (plan == null || plan.IsEmpty || budget == null || dv == null) return issues;
+            TransferChecks.CheckStages(plan, budget, dv, from, issues, parking_period);
+            return issues;
+        }
+
+        /// <summary>
+        /// Where the stage walk starts: the step after Launch (Circularise) while Launch is still to fly -
+        /// the budget is then the stages above stage 1 - else the current step.
+        /// </summary>
+        public static int BudgetFrom(MissionPlanData plan, out bool before_launch)
+        {
+            before_launch = false;
+            if (plan == null) return 0;
+            int launch = plan.steps.FindIndex(x => x.type == StepCatalog.Launch);
+            if (launch >= 0 && plan.steps[launch].state != "done" && launch >= plan.current)
+            {
+                before_launch = true;
+                return launch + 1;
+            }
+            int from = Math.Max(0, plan.current);
+            // a transfer's node is placed but not flown yet: its burn still comes out of the stages
+            if (from > 0 && from < plan.steps.Count && plan.steps[from].type == StepCatalog.Node &&
+                TransferChecks.PlacesNode(plan.steps[from - 1]) && plan.steps[from - 1].state == "done")
+                from--;
+            return from;
+        }
+
+        /// <summary>Period of the plan's parking orbit (the Launch step's apoapsis, circular), or 0.</summary>
+        public static double ParkingPeriod(MissionPlanData plan, double mu, double radius)
+        {
+            var launch = plan?.steps.FirstOrDefault(x => x.type == StepCatalog.Launch);
+            if (launch == null) return 0;
+            return OrbitMath.Period(mu, radius + launch.GetFloat("ap_km") * 1000);
         }
 
         /// <summary>Rough Δv per step, from the planned orbits alone (circular orbits around the home body). NaN = can't say.</summary>
@@ -326,6 +415,7 @@ namespace K2D2.Mission
         {
             var result = new List<double>();
             double alt_km = double.NaN, inc = double.NaN;
+            MissionStepData launch = null;
             foreach (var s in plan.steps)
             {
                 double dv = double.NaN;
@@ -334,6 +424,25 @@ namespace K2D2.Mission
                     case StepCatalog.Launch:
                         alt_km = s.GetFloat("ap_km");
                         inc = s.GetFloat("inclination");
+                        launch = s;
+                        break;
+                    case StepCatalog.Circularise:
+                        // the upper stage raises periapsis from where stage 1 left it (its max periapsis with
+                        // disposal on; without, assume from the surface - a generous figure)
+                        if (launch != null && !double.IsNaN(alt_km))
+                        {
+                            double pe_km = launch.GetBool("optimiser") ? Math.Min(launch.GetFloat("pe_cap_km"), (float)alt_km) : 0;
+                            double ap = radius + alt_km * 1000;
+                            dv = OrbitMath.CircularizeToDv(mu, radius + pe_km * 1000, ap, ap);
+                        }
+                        launch = null;
+                        break;
+                    case StepCatalog.Transfer:
+                    case StepCatalog.Correction:
+                    case StepCatalog.Capture:
+                        dv = TransferChecks.Estimate(plan.steps, s, mu, radius, alt_km, inc);
+                        // after the transfer the orbit isn't the home body's any more
+                        if (s.type == StepCatalog.Transfer) alt_km = double.NaN;
                         break;
                     case StepCatalog.Plane:
                         if (!double.IsNaN(alt_km))

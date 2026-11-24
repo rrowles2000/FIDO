@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using K2D2.Controller;
 using KSP.Game;
@@ -111,10 +112,18 @@ namespace K2D2.Mission
 
         StepRunner RunnerFor(int index)
         {
-            if (runner_index == index && runner != null) return runner;
+            if (runner_index == index && runner != null)
+            {
+                runner.mission = plan;
+                return runner;
+            }
             var step = plan.steps[index];
             runner = step.Type?.create?.Invoke();
-            if (runner != null) runner.step = step;
+            if (runner != null)
+            {
+                runner.step = step;
+                runner.mission = plan;
+            }
             runner_index = index;
             return runner;
         }
@@ -130,7 +139,8 @@ namespace K2D2.Mission
         {
             if (plan == null || plan.IsEmpty) return "No mission on this vessel";
             if (plan.status == "done") return "Mission complete";
-            var errors = MissionValidator.Check(plan).Where(i => i.error).ToList();
+            var errors = MissionValidator.Check(plan, Budget(plan), Estimates(plan), MissionValidator.BudgetFrom(plan, out _), ParkingPeriod(plan))
+                .Where(i => i.error).ToList();
             if (errors.Count > 0) return errors[0].text;
             // on the pad (or landed) the next step to run must be Launch: a plan without one would run
             // e.g. a decouple part action on the pad (2026-11-23)
@@ -142,6 +152,53 @@ namespace K2D2.Mission
                     return $"Step {i + 1} ({plan.steps[i].Summary}) would run on the pad - add a Launch step before it";
             }
             return null;
+        }
+
+        // ================================================================ stage checks
+
+        Lift.Stage1.Stage1Model pad_model;
+        VesselComponent pad_model_vessel;
+        int pad_model_parts = -1;
+        float pad_model_at = -100;
+
+        /// <summary>
+        /// The stages the plan's remaining burns come out of: before launch the stages above stage 1
+        /// (read from the vessel), after it the vessel's stages as they are.
+        /// </summary>
+        public StageBudget Budget(MissionPlanData p)
+        {
+            var vessel = K2D2_Plugin.Instance?.current_vessel?.VesselComponent;
+            if (vessel == null || p == null) return null;
+            MissionValidator.BudgetFrom(p, out bool before_launch);
+            if (!before_launch) return StageBudget.Live(vessel);
+            int parts = PartCount(vessel);
+            // nothing burns on the pad: rebuild only for another vessel or a change of parts (building logs every stage)
+            bool retry = pad_model != null && !pad_model.valid && UnityEngine.Time.unscaledTime - pad_model_at > 5;
+            if (pad_model == null || retry || pad_model_vessel != vessel || pad_model_parts != parts)
+            {
+                pad_model_at = UnityEngine.Time.unscaledTime;
+                pad_model = Lift.Stage1.Stage1Model.Build(vessel, allowNoUpper: true);
+                pad_model_vessel = vessel;
+                pad_model_parts = parts;
+            }
+            return StageBudget.AfterStage1(pad_model);
+        }
+
+        public static List<double> Estimates(MissionPlanData p)
+        {
+            var body = K2D2_Plugin.Instance?.current_vessel?.VesselComponent?.mainBody;
+            return body == null || p == null ? null : MissionValidator.Estimates(p, body.gravParameter, body.radius);
+        }
+
+        public static double ParkingPeriod(MissionPlanData p)
+        {
+            var vessel = K2D2_Plugin.Instance?.current_vessel?.VesselComponent;
+            var body = vessel?.mainBody;
+            if (body == null || p == null) return 0;
+            MissionValidator.BudgetFrom(p, out bool before_launch);
+            if (before_launch) return MissionValidator.ParkingPeriod(p, body.gravParameter, body.radius);
+            try { return vessel.Orbit != null && vessel.Orbit.eccentricity < 1 ? vessel.Orbit.period : 0; }
+            catch (Exception) { return 0; }
         }
 
         /// <summary>The craft is on the pad, landed or splashed down: still to launch.</summary>

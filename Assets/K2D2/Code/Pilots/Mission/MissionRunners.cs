@@ -23,6 +23,7 @@ namespace K2D2.Mission
     public abstract class StepRunner
     {
         public MissionStepData step;
+        public MissionPlanData mission; // the whole plan, for steps that look ahead (transfers aim for a later Capture)
         public string status = "";
 
         protected static KSPVessel Vessel => K2D2_Plugin.Instance.current_vessel;
@@ -31,6 +32,9 @@ namespace K2D2.Mission
 
         /// <summary>A reason the step can't start right now, or null.</summary>
         public virtual string Check() => null;
+
+        /// <summary>Warnings to show before Go (never block), or null.</summary>
+        public virtual string Advice() => null;
 
         public abstract void Start();
         public abstract StepResult Update();

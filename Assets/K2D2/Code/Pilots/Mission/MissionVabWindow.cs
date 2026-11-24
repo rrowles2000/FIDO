@@ -104,6 +104,8 @@ namespace K2D2.Mission
                 sat_count = Module_K2ActionTarget.MarkedSatellitesInVab,
                 context_signature = () => Module_K2ActionTarget.MarkedSatellitesInVab().ToString(),
                 launch_first = () => true, // a VAB craft is still to launch
+                stage_budget = _ => StageBudget.AfterStage1(K2D2.Lift.Next.VabAdvisor.CraftModel()),
+                parking_period = ParkingPeriod,
             };
             scroll.Add(editor.Build());
 
@@ -142,6 +144,12 @@ namespace K2D2.Mission
             foreach (var sheet in sheets)
                 shell.styleSheets.Add(sheet);
             styled = true;
+        }
+
+        static double ParkingPeriod(MissionPlanData plan)
+        {
+            var home = TransferChecks.Home;
+            return home == null ? 0 : MissionValidator.ParkingPeriod(plan, home.gravParameter, home.radius);
         }
 
         static List<double> Estimates(MissionPlanData plan)

@@ -29,7 +29,7 @@ namespace K2D2.Mission
 
         FullStatus status_bar;
         VisualElement no_plan_el, plan_el, current_el;
-        Label current_title, current_detail, dv_label;
+        Label current_title, current_detail, dv_label, advice_label;
         ToggleButton run_button;
         Button skip_button, manual_button, reset_button;
         MissionEditor editor;
@@ -76,6 +76,11 @@ namespace K2D2.Mission
             dv_label = new Label();
             dv_label.AddToClassList("k2-slider-value-label");
             current_el.Add(dv_label);
+            advice_label = new Label();
+            advice_label.AddToClassList("k2-slider-value-label");
+            advice_label.style.whiteSpace = WhiteSpace.Normal;
+            advice_label.style.color = new UnityEngine.Color(1f, 0.85f, 0.5f);
+            current_el.Add(advice_label);
 
 
             run_button = new ToggleButton { label = "Go", name = "run" };
@@ -117,7 +122,9 @@ namespace K2D2.Mission
                 on_changed = i => pilot.PlanChanged(i),
                 editable = i => pilot.Editable(i),
                 current_index = () => pilot.plan == null || pilot.IsDone ? -1 : pilot.plan.current,
-                estimates = Estimates,
+                estimates = MissionPilot.Estimates,
+                stage_budget = pilot.Budget,
+                parking_period = MissionPilot.ParkingPeriod,
                 part_count = tag => PartActionCatalog.FindInFlight(K2D2_Plugin.Instance.current_vessel?.VesselComponent, tag).Count,
                 sat_count = () => K2D2.Constellation.ConstellationVessel.FindSatellites(K2D2_Plugin.Instance.current_vessel?.VesselComponent).Count,
                 current_body = () => K2D2_Plugin.Instance.current_vessel?.VesselComponent?.mainBody,
@@ -140,12 +147,6 @@ namespace K2D2.Mission
             b.style.height = 26;
             b.style.flexGrow = 1;
             return b;
-        }
-
-        static List<double> Estimates(MissionPlanData plan)
-        {
-            var body = K2D2_Plugin.Instance.current_vessel?.VesselComponent?.mainBody;
-            return body == null ? null : MissionValidator.Estimates(plan, body.gravParameter, body.radius);
         }
 
         void OpenStepTab()
@@ -176,6 +177,8 @@ namespace K2D2.Mission
                 current_title.text = plan.IsEmpty ? "Add some steps below" : "Mission complete";
                 current_detail.text = "";
                 dv_label.text = "";
+                advice_label.text = "";
+                advice_label.Show(false);
                 run_button.Show(false);
                 skip_button.Show(false);
                 manual_button.Show(false);
@@ -187,6 +190,14 @@ namespace K2D2.Mission
                 var vessel = K2D2_Plugin.Instance.current_vessel?.VesselComponent;
                 double dv = vessel?.VesselDeltaV?.TotalDeltaVVac ?? 0;
                 dv_label.text = $"Vessel Δv (vac): {dv:n0} m/s";
+                string advice = null;
+                if (!running)
+                {
+                    try { advice = pilot.Runner?.Advice(); }
+                    catch (Exception e) { advice = "Couldn't check this step: " + e.Message; }
+                }
+                advice_label.text = advice ?? "";
+                advice_label.Show(!string.IsNullOrEmpty(advice));
                 run_button.Show(true);
                 run_button.SetEnabled(running || pilot.GoProblem() == null);
                 skip_button.Show(true);

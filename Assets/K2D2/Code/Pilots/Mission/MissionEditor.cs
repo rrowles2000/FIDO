@@ -34,6 +34,15 @@ namespace K2D2.Mission
         // the craft is still to launch (VAB, or in flight on the pad / landed): the plan must start with
         // Launch + Circularise, so Go on the pad never runs another step (e.g. a decouple) first
         public Func<bool> launch_first = () => false;
+        // the stages the plan's burns come out of (see MissionValidator.BudgetFrom); null = no stage checks
+        public Func<MissionPlanData, StageBudget> stage_budget;
+        // the parking orbit's period, for the long-burn warning
+        public Func<MissionPlanData, double> parking_period;
+        // the stage budget changes without the plan changing (fuel burned, a stage dropped): re-read it
+        // every couple of seconds and rebuild only if it changed (a rebuild takes focus off a text field)
+        float next_stage_check;
+        StageBudget budget;
+        string budget_sig = "";
 
         public VisualElement root;
         VisualElement list_el, issues_el, add_row;
@@ -115,7 +124,27 @@ namespace K2D2.Mission
             if (type.id != StepCatalog.Launch) at = Math.Max(at, after_launch);
             else if (launch_first() && !plan.steps.Any(x => x.type == StepCatalog.Launch)) at = after_launch; // first, after quicksaves
             ShiftExpanded(at, 1);
-            plan.steps.Insert(at, type.NewStep());
+            var added = type.NewStep();
+            // a correction (or another transfer) is usually for the transfer before it: copy its target
+            if (type.id == StepCatalog.Correction || type.id == StepCatalog.Transfer || type.id == StepCatalog.Capture)
+            {
+                var before = plan.steps.Take(at).LastOrDefault(TransferChecks.PlacesNode);
+                if (before != null)
+                {
+                    added.p["target"] = before.Get("target");
+                    if (type.id == StepCatalog.Capture)
+                    {
+                        if (before.type == StepCatalog.Capture)
+                        {
+                            added.p["alt_km"] = before.Get("alt_km");
+                            added.p["orbit"] = before.Get("orbit");
+                        }
+                        else added.p["alt_km"] = before.Get("pe_km");
+                    }
+                    else added.p["pe_km"] = before.type == StepCatalog.Capture ? before.Get("alt_km") : before.Get("pe_km");
+                }
+            }
+            plan.steps.Insert(at, added);
             // Circularise has to follow Launch, so it comes with it
             if (type.id == StepCatalog.Launch &&
                 (at + 1 >= plan.steps.Count || plan.steps[at + 1].type != StepCatalog.Circularise))
@@ -243,6 +272,18 @@ namespace K2D2.Mission
             int current = current_index();
             string sig = Signature(plan, current) + "|" + selected + "|" + string.Join(",", expanded.OrderBy(k => k)) +
                          "|" + context_signature?.Invoke();
+            if (stage_budget != null && (force || Time.unscaledTime >= next_stage_check))
+            {
+                next_stage_check = Time.unscaledTime + 2;
+                try { budget = plan == null ? null : stage_budget(plan); }
+                catch (Exception e)
+                {
+                    budget = null;
+                    Debug.LogWarning("[K2D2 Mission] stage budget: " + e.Message);
+                }
+                budget_sig = budget == null ? "" : budget.source + budget.Describe() + StagingSettingsSig();
+            }
+            sig += "|" + budget_sig;
             if (!force && sig == shown_signature) return;
             shown_signature = sig;
 
@@ -276,7 +317,17 @@ namespace K2D2.Mission
                 }
             }
 
-            foreach (var issue in MissionValidator.Check(plan))
+            var checks = budget == null
+                ? MissionValidator.Check(plan)
+                : MissionValidator.Check(plan, budget, dv, MissionValidator.BudgetFrom(plan, out _), parking_period?.Invoke(plan) ?? 0);
+            if (budget != null && plan.steps.Any(TransferChecks.PlacesNode))
+            {
+                var l = new Label($"Stages for the burns: {budget.Describe()} ({budget.source})");
+                l.AddToClassList("k2-slider-value-label");
+                l.style.whiteSpace = WhiteSpace.Normal;
+                issues_el.Add(l);
+            }
+            foreach (var issue in checks)
             {
                 var l = new Label((issue.error ? "✖ " : "⚠ ") + issue.text);
                 l.style.whiteSpace = WhiteSpace.Normal;
@@ -284,6 +335,8 @@ namespace K2D2.Mission
                 issues_el.Add(l);
             }
         }
+
+        static string StagingSettingsSig() => K2D2.Controller.StagingSettings.auto_staging.V ? "|as" : "|-";
 
         static string StateMark(MissionStepData s, bool is_current) =>
             s.state == "done" ? "✔" : s.state == "skipped" ? "↷" : s.state == "failed" ? "✖" : is_current ? "▶" : "·";
@@ -515,6 +568,21 @@ namespace K2D2.Mission
         {
             switch (p.kind)
             {
+                case ParamKind.Choice:
+                {
+                    var options = p.choices?.Invoke() ?? new List<string>();
+                    string value = s.Get(p.key);
+                    if (!string.IsNullOrEmpty(value) && !options.Contains(value)) options.Insert(0, value);
+                    if (options.Count == 0) options.Add(value ?? "");
+                    var d = new DropdownField(p.label, options, Math.Max(0, options.IndexOf(value)));
+                    d.RegisterValueChangedCallback(e =>
+                    {
+                        s.p[p.key] = e.newValue;
+                        // rebuild after the dropdown's own callback has finished (the rebuild replaces it)
+                        root.schedule.Execute(() => Changed(i));
+                    });
+                    return d;
+                }
                 case ParamKind.Bool:
                 {
                     var t = new K2Toggle(p.label);
