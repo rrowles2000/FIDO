@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
+using KSP.Sim.impl;
 using Fido.KSPService;
 using KSP.Sim;
 using KSP.Sim.Maneuver;
@@ -102,6 +105,7 @@ namespace Fido.Node
             nan_since = -1;
             no_thrust_since = -1;
             no_dir_since = -1;
+            planned_orbit = null;
             trimming = false;
             last_remaining_dv = -1;
 
@@ -248,6 +252,115 @@ namespace Fido.Node
             catch (Exception e) { return "pointing: " + e.Message; }
         }
 
+        // ---------------------------------------------------------------- orbit result (2026-11-26)
+        // How good a burn was, judged by the orbit it leaves, not by any Δv figure (the solver's
+        // "remaining" reads high near the end; C-7). At ignition: the game's planned orbit after the
+        // node, plus the first patch around another body (an encounter: its periapsis). At the end:
+        // the same read off the vessel's real trajectory. One "[Burn] orbit result" line per burn,
+        // with the Δv at the planned apsis that would close the Pe gap (ksplog reads it).
+        class OrbitSnap
+        {
+            public string body = "?", enc_body;
+            public double ap_km = double.NaN, pe_km = double.NaN, inc = double.NaN, ecc = double.NaN, enc_pe_km = double.NaN;
+
+            public static OrbitSnap From(IEnumerable<PatchedConicsOrbit> patches)
+            {
+                var list = patches?.Where(p => p != null).OrderBy(p => p.StartUT).ToList();
+                if (list == null || list.Count == 0) return null;
+                var first = list[0];
+                var snap = new OrbitSnap
+                {
+                    body = first.referenceBody?.bodyName ?? "?",
+                    pe_km = first.PeriapsisArl / 1000,
+                    ap_km = first.eccentricity < 1 ? first.ApoapsisArl / 1000 : double.PositiveInfinity,
+                    inc = first.inclination,
+                    ecc = first.eccentricity,
+                };
+                var enc = list.FirstOrDefault(p => p.referenceBody?.bodyName != snap.body && p.referenceBody?.bodyName != first.referenceBody?.referenceBody?.bodyName);
+                if (enc != null)
+                {
+                    snap.enc_body = enc.referenceBody.bodyName;
+                    snap.enc_pe_km = enc.PeriapsisArl / 1000;
+                }
+                return snap;
+            }
+
+            static string Km(double km) => double.IsPositiveInfinity(km) ? "escape" : double.IsNaN(km) ? "?" : $"{km:n1}";
+
+            public override string ToString() =>
+                $"{body} Ap {Km(ap_km)} Pe {Km(pe_km)} km, inc {inc:n2}°, ecc {ecc:n4}" +
+                (enc_body != null ? $", {enc_body} Pe {Km(enc_pe_km)} km" : ", no encounter");
+        }
+
+        OrbitSnap planned_orbit;
+
+        OrbitSnap PlannedAfterNode()
+        {
+            try
+            {
+                var trajectory = current_vessel?.VesselComponent?.Orbiter?.ManeuverPlanSolver?.ManeuverTrajectory;
+                if (trajectory == null || maneuver == null) return null;
+                return OrbitSnap.From(trajectory.OfType<PatchedConicsOrbit>().Where(p => p.StartUT >= maneuver.Time - 5));
+            }
+            catch (Exception e) { logger.LogWarning("[Burn] reading the planned orbit: " + e.Message); return null; }
+        }
+
+        OrbitSnap ActualNow()
+        {
+            try
+            {
+                var vc = current_vessel?.VesselComponent;
+                var trajectory = vc?.Orbiter?.PatchedConicSolver?.CurrentTrajectory?.OfType<PatchedConicsOrbit>().ToList();
+                double now = GeneralTools.Game.UniverseModel.UniverseTime;
+                // from the patch we're on now (drop any that already ended)
+                var from_now = trajectory?.Where(p => p.EndUT <= 0 || p.EndUT >= now || double.IsInfinity(p.EndUT)).ToList();
+                var snap = from_now != null && from_now.Count > 0 ? OrbitSnap.From(from_now) : null;
+                // the orbit itself from the live vessel (the trajectory list can lag a frame); the
+                // trajectory only adds the encounter
+                var live = vc?.Orbit == null ? null : OrbitSnap.From(new[] { vc.Orbit });
+                if (live == null) return snap;
+                if (snap != null)
+                {
+                    live.enc_body = snap.enc_body;
+                    live.enc_pe_km = snap.enc_pe_km;
+                }
+                return live;
+            }
+            catch (Exception e) { logger.LogWarning("[Burn] reading the actual orbit: " + e.Message); return null; }
+        }
+
+        // Δv (m/s, + = more burn was needed) at the planned orbit's apoapsis that moves the actual Pe
+        // to the planned Pe - for an elliptical orbit around the same body; NaN otherwise
+        double PeGapDv(OrbitSnap plan, OrbitSnap act)
+        {
+            try
+            {
+                if (plan == null || act == null || plan.body != act.body || !(act.ecc < 1) || !(plan.ecc < 1)) return double.NaN;
+                var body = current_vessel?.VesselComponent?.mainBody;
+                if (body == null || body.bodyName != act.body) return double.NaN;
+                double mu = body.gravParameter, R = body.radius;
+                double ra = R + act.ap_km * 1000;
+                double V(double pe_km) { double rp = R + pe_km * 1000; return Math.Sqrt(mu * (2 / ra - 2 / (ra + rp))); }
+                return V(plan.pe_km) - V(act.pe_km);
+            }
+            catch { return double.NaN; }
+        }
+
+        void LogOrbitResult(string reason)
+        {
+            var act = ActualNow();
+            if (planned_orbit == null && act == null) return;
+            double gap = PeGapDv(planned_orbit, act);
+            string diff = planned_orbit != null && act != null && planned_orbit.body == act.body
+                ? $" | error Ap {act.ap_km - planned_orbit.ap_km:+0.0;-0.0} Pe {act.pe_km - planned_orbit.pe_km:+0.0;-0.0} km, inc {act.inc - planned_orbit.inc:+0.00;-0.00}°" +
+                  (planned_orbit.enc_body != null && act.enc_body == planned_orbit.enc_body ? $", {act.enc_body} Pe {act.enc_pe_km - planned_orbit.enc_pe_km:+0.0;-0.0} km" : "") +
+                  (planned_orbit.enc_body != null && act.enc_body != planned_orbit.enc_body ? $", ENCOUNTER {(act.enc_body ?? "lost")}" : "") +
+                  (double.IsNaN(gap) ? "" : $", Pe gap = {gap:+0.0;-0.0} m/s at Ap")
+                : "";
+            logger.LogInfo($"[Burn] orbit result ({reason}, node Δv {maneuver?.BurnRequiredDV ?? double.NaN:n1} m/s, count said {remaining_dv:n1} left, solver {solver_remaining:n1}): " +
+                           $"planned {planned_orbit?.ToString() ?? "?"} | actual {act?.ToString() ?? "?"}{diff}");
+        }
+
         Vector3d initial_dir = Vector3d.zero;
 
         // The game's maneuver solver can hand back NaN (2026-11-14: a stage-1 apoapsis burn sat at
@@ -318,6 +431,7 @@ namespace Fido.Node
                     LogBurn($"ignition (node Δv {maneuver.BurnRequiredDV:n1} m/s, FIDO burn time {OwnBurnTime():n1} s, game's {maneuver.BurnDuration:n1} s" +
                             $"{(owning ? "" : ", solver burn")})");
                     log_geometry_at_ignition = true;
+                    planned_orbit = PlannedAfterNode();
 
                     if (BurnManeuverSettings.rotate_during_burn.V)
                         SASTool.setAutoPilot(AutopilotMode.Maneuver);
@@ -473,6 +587,7 @@ namespace Fido.Node
             set_throttle(0);
             finished = true;
             LogBurn($"complete ({reason}) after {GeneralTools.Game.UniverseModel.UniverseTime - ignition_ut:n1}s");
+            LogOrbitResult(reason);
         }
 
         float last_throttle = -1;
