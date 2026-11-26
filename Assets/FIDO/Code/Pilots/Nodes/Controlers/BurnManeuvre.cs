@@ -156,6 +156,11 @@ namespace Fido.Node
         // (2026-11-23: a 1,267 m/s burn stopped at 0.1 m/s by its count while the game's solver said
         // 11.5). Below TrimBelowDv by the count, the end of the burn steers by the solver's remaining
         // Δv instead, while that is finite and believable (under TrimTrustDv); otherwise the count.
+        // OFF (2026-11-26, first flight with it): the solver is no better. On 8 stage-1 burns before,
+        // the count's end left the solver saying 11-14 m/s yet Pe came 52.4-53.5 km for a 55 km aim
+        // (count ~5 m/s short); finishing on the solver overshot 12 m/s (Pe 62.0, over the cap) - it
+        // reads high near the end and lags at ~55 m/s². Next: trim against the target orbit (Pe/Ap).
+        const bool SolverTrim = false;
         const double TrimBelowDv = 20;
         const double TrimTrustDv = 60;
         bool trimming;
@@ -373,7 +378,7 @@ namespace Fido.Node
                         return;
                     }
                     bool solver_ok = !double.IsNaN(solver_remaining) && Math.Abs(solver_remaining) < TrimTrustDv;
-                    if (!trimming && own < TrimBelowDv && solver_ok)
+                    if (SolverTrim && !trimming && own < TrimBelowDv && solver_ok)
                     {
                         trimming = true;
                         logger.LogInfo($"[Burn] trim: {own:n1} m/s left by FIDO's count, {solver_remaining:n1} by the game's solver - finishing on the solver");
