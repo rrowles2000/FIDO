@@ -5,6 +5,46 @@ using UnityEngine.UIElements;
 
 namespace Fido.Lift
 {
+    /// <summary>
+    /// The launch directions, shared by the Lift panel's buttons and the Mission Launch step's presets
+    /// so both read the same (2026-11-26). All are orbit inclinations, turned into a heading for the
+    /// pad's latitude with the planet's spin cancelled (OrbitMath.LaunchHeading).
+    /// </summary>
+    public static class LaunchDirections
+    {
+        public class Dir
+        {
+            public string name;          // button text, and the start of the preset name
+            public float inclination;    // degrees
+            public bool south;           // polar south: launch southward
+            public string PresetLabel => $"{name} ({inclination:0}°)";
+        }
+
+        public static readonly Dir[] All =
+        {
+            new Dir { name = "East",    inclination = 0 },
+            new Dir { name = "West",    inclination = 180 },
+            new Dir { name = "Polar N", inclination = 90 },
+            new Dir { name = "Polar S", inclination = 90, south = true },
+        };
+
+        /// <summary>The direction these settings match, or null (a custom inclination).</summary>
+        public static Dir Match(float inclination, bool south) =>
+            System.Array.Find(All, d => Mathf.Abs(d.inclination - inclination) < 0.05f && d.south == south);
+
+        /// <summary>The launch heading (navball degrees) for an inclination from this vessel's latitude.</summary>
+        public static bool Heading(KSP.Sim.impl.VesselComponent vessel, float ap_km, float inclination, bool south, out double heading)
+        {
+            heading = 0;
+            var body = vessel?.mainBody;
+            if (body == null) return false;
+            double orbit_speed = Fido.Constellation.OrbitMath.CircularSpeed(body.gravParameter, body.radius + ap_km * 1000.0);
+            Fido.Constellation.OrbitMath.LaunchHeading(inclination, vessel.Latitude, orbit_speed,
+                Fido.Constellation.OrbitMath.EquatorialSurfaceSpeed(body), !south, out heading);
+            return true;
+        }
+    }
+
     public class LiftSettings
     {
         public ClampSetting<float> heading = new ("lift.heading", 90,  0 , 360);

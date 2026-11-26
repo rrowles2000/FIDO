@@ -186,15 +186,16 @@ namespace Fido.Mission
                         "needs a separator marked 'Stage 1 separator'"),
                     new ParamDef("pe_cap_km", "Stage 1 max periapsis (km)", ParamKind.Float, "55"),
                 },
-                presets =
+                // the Lift panel's direction buttons, same names and order (Fido.Lift.LaunchDirections)
+                presets = Fido.Lift.LaunchDirections.All.Select(d => new StepPreset(d.PresetLabel, new()
                 {
-                    new StepPreset("East (equatorial, 0°)", new() { ["inclination"] = "0", ["south"] = "false" }),
-                    new StepPreset("North polar (90°)", new() { ["inclination"] = "90", ["south"] = "false" }),
-                    new StepPreset("South polar (90°)", new() { ["inclination"] = "90", ["south"] = "true" }),
-                    new StepPreset("West (retrograde, 180°)", new() { ["inclination"] = "180", ["south"] = "false" }),
-                },
-                summary = s => $"Launch to {Km(s, "ap_km")}, {s.GetFloat("inclination"):0.#}°" +
-                               (s.GetBool("south") ? " south" : "") +
+                    ["inclination"] = d.inclination.ToString("0", System.Globalization.CultureInfo.InvariantCulture),
+                    ["south"] = d.south ? "true" : "false",
+                })).ToList(),
+                summary = s => $"Launch to {Km(s, "ap_km")}, " +
+                               (Fido.Lift.LaunchDirections.Match(s.GetFloat("inclination"), s.GetBool("south")) is { } dir
+                                   ? dir.PresetLabel
+                                   : $"{s.GetFloat("inclination"):0.#}°" + (s.GetBool("south") ? " south" : "")) +
                                (s.GetBool("optimiser") ? ", stage 1 disposal" : ""),
                 create = () => new LaunchRunner(),
             },

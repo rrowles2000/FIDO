@@ -115,11 +115,20 @@ namespace Fido.Lift
                 b.style.marginLeft = b.style.marginRight = 1;
                 row.Add(b);
             }
-            Add("North", () => settings.heading.V = 0);
-            Add("East", () => settings.heading.V = 90);
-            Add("South", () => settings.heading.V = 180);
-            Add("West", () => settings.heading.V = 270);
-            Add("Polar", () => { if (PolarHeading(settings, out double h)) settings.heading.V = (float)h; });
+            // the same four as the Mission Launch step's presets (LaunchDirections); any other heading
+            // is set on the compass
+            foreach (var d in LaunchDirections.All)
+            {
+                var dir = d;
+                Add(dir.name, () =>
+                {
+                    if (!LaunchDirections.Heading(FidoPlugin.Instance.current_vessel?.VesselComponent,
+                            settings.destination_Ap_km.V, dir.inclination, dir.south, out double h)) return;
+                    settings.heading.V = (float)h;
+                    settings.polar_inclination.V = dir.inclination;
+                    settings.polar_south.V = dir.south;
+                });
+            }
 
             polar_hint = new Label();
             polar_hint.AddToClassList("k2-slider-value-label");
@@ -127,19 +136,15 @@ namespace Fido.Lift
             parent.Insert(index >= 0 ? index + 1 : parent.childCount, polar_hint);
         }
 
-        // heading for a 90° orbit, northward, from this pad at the target altitude
-        bool PolarHeading(LiftSettings settings, out double heading)
+        // "East 90.0° · West 270.0° · Polar N 359.4° · Polar S 180.6° at 85 km" for this pad
+        string DirectionsHint(LiftSettings settings)
         {
-            heading = 0;
             var vessel = FidoPlugin.Instance.current_vessel?.VesselComponent;
-            var body = vessel?.mainBody;
-            if (body == null) return false;
-
-            double orbit_speed = Fido.Constellation.OrbitMath.CircularSpeed(body.gravParameter,
-                body.radius + settings.destination_Ap_km.V * 1000.0);
-            double surface_speed = Fido.Constellation.OrbitMath.EquatorialSurfaceSpeed(body);
-            Fido.Constellation.OrbitMath.LaunchHeading(90, vessel.Latitude, orbit_speed, surface_speed, true, out heading);
-            return true;
+            var parts = new System.Collections.Generic.List<string>();
+            foreach (var d in LaunchDirections.All)
+                if (LaunchDirections.Heading(vessel, settings.destination_Ap_km.V, d.inclination, d.south, out double h))
+                    parts.Add($"{d.name} {h:n1}°");
+            return parts.Count == 0 ? "" : $"Headings for {settings.destination_Ap_km.V} km: " + string.Join(" · ", parts);
         }
 
         // navball-style name for a heading: North, North-east, ... (within 2° of a cardinal = that name)
@@ -192,9 +197,7 @@ namespace Fido.Lift
 
             if (polar_hint != null)
             {
-                polar_hint.text = PolarHeading(settings, out double polar_heading)
-                    ? $"Polar (90° orbit, going north) = heading {polar_heading:n1}° at {settings.destination_Ap_km.V} km"
-                    : "";
+                polar_hint.text = DirectionsHint(settings);
             }
 
             final_grp.Show(false);
