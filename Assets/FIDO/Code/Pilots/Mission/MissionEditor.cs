@@ -419,7 +419,10 @@ namespace Fido.Mission
             params_el.style.borderLeftColor = new Color(1, 1, 1, 0.25f);
             if (!can_edit)
             {
-                var flown = new Label("Already flown - settings locked");
+                // 2026-11-26: the running Launch step said "Already flown", so its greyed dropdown read as broken
+                var flown = new Label(i == current_index() && s.state != "done" && s.state != "skipped"
+                    ? "Running - settings locked until this step ends (its settings were applied when it started)"
+                    : "Already flown - settings locked");
                 flown.AddToClassList("k2-slider-value-label");
                 params_el.Add(flown);
             }
