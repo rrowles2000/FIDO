@@ -81,6 +81,9 @@ namespace Fido.Node
         // true once the last run's burn finished; false if it was stopped (by hand, by another
         // pilot starting, or by a vessel switch) - the Mission Execute-node step needs the difference
         public bool burn_completed;
+        // the last finished burn: Δv left (m/s, by the burn's own measure) and why it ended (C-4)
+        public double last_remaining_dv = double.NaN;
+        public string last_end_reason = "";
 
         public void setMode(Mode mode)
         {
@@ -166,6 +169,8 @@ namespace Fido.Node
                 maneuver_creator.RemoveNode(execute_node);
 
                 burn_completed = true;
+                last_remaining_dv = burn.remaining_dv;
+                last_end_reason = burn.end_reason;
                 Stop();
                 if (settings.pause_on_end.V)
                     TimeWarpTools.SetIsPaused(true);
@@ -448,6 +453,8 @@ namespace Fido.Node
                     FidoPlugin.ResetControllers();
                     TimeWarpTools.SetIsPaused(false);
                     burn_completed = false;
+                    last_remaining_dv = double.NaN;
+                    last_end_reason = "";
                 
                     setMode(Mode.Turn);
                 }

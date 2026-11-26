@@ -412,6 +412,7 @@ namespace Fido.Mission
         static double normal_sign = 1, radial_sign = 1;
 
         enum Phase { Idle, WaitNode, Verify, Done, Failed }
+        const float NodeTimeoutS = 5; // C-5: real seconds to wait for the game to place a node
         Phase phase;
         TransferPlanner.Plan plan;
         double plan_made_at = -1;
@@ -636,6 +637,7 @@ namespace Fido.Mission
             frames = 0;
             phase = Phase.WaitNode;
             status = "Placing the node";
+            verify_until = Time.unscaledTime + NodeTimeoutS;
             creator.Update();
             creator.RemoveAllNodesThenCreate(plan.UT, plan.prograde, n => node = n, plan.normal * NormalSign, plan.radial * RadialSign);
         }
@@ -650,7 +652,15 @@ namespace Fido.Mission
                 case Phase.Done: return StepResult.Done;
                 case Phase.Failed: return StepResult.Failed;
                 case Phase.WaitNode:
-                    if (node == null) return StepResult.Running;
+                    if (node == null)
+                    {
+                        // C-5: the node comes from a coroutine; if it throws, the callback never runs
+                        if (Time.unscaledTime <= verify_until) return StepResult.Running;
+                        FidoPlugin.logger.LogWarning($"[Mission] {step.type}: the game didn't place the node within {NodeTimeoutS:n0} s");
+                        status = $"The game didn't place the node within {NodeTimeoutS:n0} s";
+                        phase = Phase.Failed;
+                        return StepResult.Failed;
+                    }
                     phase = Phase.Verify;
                     frames = 0;
                     verify_until = Time.unscaledTime + 3;
@@ -770,6 +780,7 @@ namespace Fido.Mission
     class CaptureRunner : StepRunner
     {
         enum Phase { Idle, Warp, Settle, WaitNode, Verify, Done, Failed }
+        const float NodeTimeoutS = 5; // C-5: real seconds to wait for the game to place a node
         Phase phase;
         TransferPlanner.CapturePlan cplan;
         double soi_ut = double.NaN;
@@ -928,6 +939,7 @@ namespace Fido.Mission
             frames = 0;
             phase = Phase.WaitNode;
             status = "Placing the capture node";
+            verify_until = Time.unscaledTime + NodeTimeoutS;
             creator.Update();
             creator.RemoveAllNodesThenCreate(cplan.UT, cplan.prograde, n => node = n);
         }
@@ -971,7 +983,15 @@ namespace Fido.Mission
                     PlaceNode();
                     return phase == Phase.Failed ? StepResult.Failed : phase == Phase.Done ? StepResult.Done : StepResult.Running;
                 case Phase.WaitNode:
-                    if (node == null) return StepResult.Running;
+                    if (node == null)
+                    {
+                        // C-5: the node comes from a coroutine; if it throws, the callback never runs
+                        if (Time.unscaledTime <= verify_until) return StepResult.Running;
+                        FidoPlugin.logger.LogWarning($"[Mission] {step.type}: the game didn't place the node within {NodeTimeoutS:n0} s");
+                        status = $"The game didn't place the node within {NodeTimeoutS:n0} s";
+                        phase = Phase.Failed;
+                        return StepResult.Failed;
+                    }
                     phase = Phase.Verify;
                     frames = 0;
                     verify_until = Time.unscaledTime + 3;

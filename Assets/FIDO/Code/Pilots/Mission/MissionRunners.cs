@@ -317,6 +317,7 @@ namespace Fido.Mission
     class NodeRunner : StepRunner
     {
         public override string Tab => "node";
+        const double MaxLeftDv = 1.0; // m/s left after the burn before the step counts as failed
 
         public override string Check()
         {
@@ -333,9 +334,20 @@ namespace Fido.Mission
                 status = NodeExPilot.Instance.ApiStatus();
                 return StepResult.Running;
             }
-            if (NodeExPilot.Instance.burn_completed)
+            var pilot = NodeExPilot.Instance;
+            if (pilot.burn_completed)
             {
-                status = "Node executed";
+                // C-4: a burn can also end on a solver NaN or a flameout with Δv still to go; the next
+                // step (e.g. Capture after a transfer) must not start on a half-done burn
+                double left = pilot.last_remaining_dv;
+                double tol = Math.Max(MaxLeftDv, BurnManeuverSettings.max_dv_error.V + 0.5);
+                if (!double.IsNaN(left) && left > tol)
+                {
+                    status = $"Burn ended ({pilot.last_end_reason}) with {left:n1} m/s still to go (limit {tol:n1})";
+                    FidoPlugin.logger.LogWarning("[Mission] node step: " + status);
+                    return StepResult.Failed;
+                }
+                status = double.IsNaN(left) ? "Node executed" : $"Node executed ({left:n2} m/s left)";
                 return StepResult.Done;
             }
             status = "Node pilot stopped before the burn finished";

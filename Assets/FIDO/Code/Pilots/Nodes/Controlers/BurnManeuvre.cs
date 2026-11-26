@@ -76,6 +76,9 @@ namespace Fido.Node
         // all its Δv: if it runs dry the burn ends and separation carries on (2026-11-15: a 3%
         // reserve, held back only to avoid a burn that never finishes, cost ~21 km of Pe).
         public bool end_on_flameout = false;
+        // why the last burn ended ("complete", "overshoot", "solver NaN", "flameout") - the Mission
+        // Execute-node step reads it with remaining_dv (C-4)
+        public string end_reason = "";
         const double FlameoutGraceS = 2;    // after ignition, for the engines to spool up
         const double FlameoutHoldS = 0.5;   // no thrust for this long = flamed out
         const float FlameoutMinThrottle = 0.05f;
@@ -93,6 +96,7 @@ namespace Fido.Node
         public override void Start()
         {
             finished = false;
+            end_reason = "";
             mode = Mode.Waiting;
             remaining_dv = 0;
             nan_since = -1;
@@ -345,7 +349,7 @@ namespace Fido.Node
                     if (now_ut - nan_since > NaNTimeoutS)
                     {
                         logger.LogWarning($"[Burn] maneuver solver NaN for {NaNTimeoutS:n0} s - ending this burn so the flight can carry on");
-                        Finished();
+                        Finished("solver NaN");
                     }
                     else if (now_ut - nan_since > 0.5) set_throttle(0);
                     return;
@@ -365,7 +369,7 @@ namespace Fido.Node
 
                     if (last_remaining_dv > 0 && last_remaining_dv < 1 && remaining_dv > last_remaining_dv)
                     {
-                        Finished();
+                        Finished("overshoot");
                         return;
                     }
                 }
@@ -380,7 +384,7 @@ namespace Fido.Node
                     else if (now_ut - no_thrust_since > FlameoutHoldS)
                     {
                         logger.LogInfo($"[Burn] flameout with {remaining_dv:n1} m/s left - ending the burn");
-                        Finished();
+                        Finished("flameout");
                         return;
                     }
                 }
@@ -389,7 +393,7 @@ namespace Fido.Node
                 // remaining_dv = required_dv - burn_dV.burned_dV;
                 if (remaining_dv <= BurnManeuverSettings.max_dv_error.V)
                 {
-                    Finished();
+                    Finished("complete");
                     return;
                 }
                 else
@@ -407,12 +411,13 @@ namespace Fido.Node
             }
         }
 
-        void Finished()
+        void Finished(string reason)
         {
+            end_reason = reason;
             status_line = $"Burn complete - {remaining_dv:n2} m/s error";
             set_throttle(0);
             finished = true;
-            LogBurn($"complete after {GeneralTools.Game.UniverseModel.UniverseTime - ignition_ut:n1}s");
+            LogBurn($"complete ({reason}) after {GeneralTools.Game.UniverseModel.UniverseTime - ignition_ut:n1}s");
         }
 
         float last_throttle = -1;
