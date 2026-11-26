@@ -362,13 +362,25 @@ namespace Fido.Mission
             label.style.whiteSpace = WhiteSpace.Normal;
             if (s.state == "done" || s.state == "skipped") label.style.opacity = 0.6f;
             label.tooltip = string.IsNullOrEmpty(s.note) ? "Click to show or hide this step's settings" : s.note;
-            label.RegisterCallback<ClickEvent>(_ =>
+            void ToggleOpen()
             {
                 selected = i;
                 if (!expanded.Remove(i)) Open(i);
                 Refresh(true);
-            });
+            }
+            label.RegisterCallback<ClickEvent>(_ => ToggleOpen());
             row.Add(label);
+
+            // 2026-11-26: clicking the text was the only way in and the user couldn't find it - a visible button
+            bool is_open = expanded.Contains(i);
+            var edit = new Button(ToggleOpen)
+            {
+                text = is_open ? "Close" : can_edit ? "Edit" : "View",
+                tooltip = is_open ? "Hide this step's settings" : can_edit ? "Edit this step's settings" : "Show this step's settings (locked)",
+            };
+            edit.style.height = 22;
+            edit.style.minWidth = 44;
+            row.Add(edit);
 
             var auto = new Toggle { text = "auto", value = s.auto, tooltip = "Auto-continue: run straight on from the previous step" };
             auto.SetEnabled(can_edit);
