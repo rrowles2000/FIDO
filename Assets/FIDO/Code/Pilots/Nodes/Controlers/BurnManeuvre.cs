@@ -101,6 +101,8 @@ namespace Fido.Node
             remaining_dv = 0;
             nan_since = -1;
             no_thrust_since = -1;
+            no_dir_since = -1;
+            trimming = false;
             last_remaining_dv = -1;
 
             if (current_vessel == null) return;
@@ -125,18 +127,38 @@ namespace Fido.Node
         double delivered_dv, last_count_ut;
         bool owning; // own_burn latched at ignition
 
-        double OwnRemaining(double now_ut)
+        // C-8 (2026-11-26): a frame gap is clamped, not dropped (dropping it under-counted, so the
+        // burn ran long), and a frame with no node direction (NaN angle) gets no credit - it used to
+        // count as dead on (cos = 1). No direction for LostNodeS ends the burn ("node lost").
+        const double MaxCountDtS = 1.0;
+        const double LostNodeS = 1.0;
+        double no_dir_since = -1;
+
+        double OwnRemaining(double now_ut, out double angle_deg)
         {
             double dt = now_ut - last_count_ut;
             last_count_ut = now_ut;
-            if (dt > 0 && dt < 5)
+            angle_deg = NodeAngleDeg();
+            if (double.IsNaN(angle_deg))
             {
-                double a = NodeAngleDeg();
-                double cos = double.IsNaN(a) ? 1 : Math.Max(0, Math.Cos(a * Math.PI / 180));
-                delivered_dv += burn_dV.actual_dv * cos * dt;
+                if (no_dir_since < 0) no_dir_since = now_ut;
+            }
+            else
+            {
+                no_dir_since = -1;
+                if (dt > 0)
+                    delivered_dv += burn_dV.actual_dv * Math.Max(0, Math.Cos(angle_deg * Math.PI / 180)) * Math.Min(dt, MaxCountDtS);
             }
             return maneuver.BurnRequiredDV - delivered_dv;
         }
+
+        // C-7 (2026-11-26): the own count is open loop (thrust / mass x cos x dt) and drifts ~1%
+        // (2026-11-23: a 1,267 m/s burn stopped at 0.1 m/s by its count while the game's solver said
+        // 11.5). Below TrimBelowDv by the count, the end of the burn steers by the solver's remaining
+        // Δv instead, while that is finite and believable (under TrimTrustDv); otherwise the count.
+        const double TrimBelowDv = 20;
+        const double TrimTrustDv = 60;
+        bool trimming;
 
         /// <summary>Angle (°) of the vessel's nose (control part up) to the game's node direction; NaN without one.</summary>
         double NodeAngleDeg()
@@ -254,7 +276,7 @@ namespace Fido.Node
             double R = o.referenceBody.radius;
             double now = GeneralTools.Game.UniverseModel.UniverseTime;
             logger.LogInfo($"[Burn] {what}: {(now - UT >= 0 ? "+" : "")}{now - UT:n1}s from planned ignition, remaining {remaining_dv:n1} m/s" +
-                           (owning ? $" (delivered {delivered_dv:n1}, game solver says {solver_remaining:n1})" : "") + ", " +
+                           (owning ? $" (delivered {delivered_dv:n1}, game solver says {solver_remaining:n1}{(trimming ? ", trimming on solver" : "")})" : "") + ", " +
                            $"{(owning ? "nose off node" : "angle off start")} {angle:n1}°, throttle {last_throttle:n2}, Ap {(o.Apoapsis - R) / 1000:n1} Pe {(o.Periapsis - R) / 1000:n1} km, " +
                            $"inc {o.inclination:n2}°, mass {v.totalMass:n2} t");
         }
@@ -336,8 +358,36 @@ namespace Fido.Node
 
                 if (owning)
                 {
-                    remaining_dv = OwnRemaining(now_ut);
-                    angle = (float)NodeAngleDeg();
+                    double own = OwnRemaining(now_ut, out double a);
+                    angle = (float)a;
+                    if (no_dir_since >= 0)
+                    {
+                        if (now_ut - no_dir_since > LostNodeS)
+                        {
+                            remaining_dv = own;
+                            logger.LogWarning($"[Burn] no node direction for {LostNodeS:n0} s - ending the burn");
+                            Finished("node lost");
+                            return;
+                        }
+                        if (now_ut - no_dir_since > 0.25) set_throttle(0);
+                        return;
+                    }
+                    bool solver_ok = !double.IsNaN(solver_remaining) && Math.Abs(solver_remaining) < TrimTrustDv;
+                    if (!trimming && own < TrimBelowDv && solver_ok)
+                    {
+                        trimming = true;
+                        logger.LogInfo($"[Burn] trim: {own:n1} m/s left by FIDO's count, {solver_remaining:n1} by the game's solver - finishing on the solver");
+                    }
+                    if (trimming && solver_ok)
+                    {
+                        remaining_dv = solver_remaining;
+                        if (last_remaining_dv > 0 && last_remaining_dv < 1 && remaining_dv > last_remaining_dv)
+                        {
+                            Finished("overshoot");
+                            return;
+                        }
+                    }
+                    else remaining_dv = own;
                 }
                 else if (!Finite(delta_speed_vector))
                 {
